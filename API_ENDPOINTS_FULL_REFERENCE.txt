@@ -1,0 +1,543 @@
+Close-X API Full Reference (All Current Routes)
+Date: 2026-05-07
+
+BASE URL
+- Production/Ngrok example: https://illaudably-chaliced-mervin.ngrok-free.dev/api
+- Local example: http://localhost:8000/api
+
+AUTH HEADER (Protected APIs)
+- Authorization: Bearer <sanctum_token>
+- Content-Type: application/json (except file upload APIs)
+
+============================================================
+A) AUTH APIs (Public)
+============================================================
+
+A1. POST /auth/login
+URL: {{base_url}}/auth/login
+Body (JSON):
+{
+  "email": "user@example.com",
+  "password": "secret123"
+}
+
+A2. POST /auth/signup
+URL: {{base_url}}/auth/signup
+Body (JSON) [OTP signup flow]:
+{
+  "name": "John Doe",
+  "email": "john@example.com",
+  "phone": "+923001112233",
+  "password": "secret123",
+  "password_confirmation": "secret123"
+}
+
+A3. POST /auth/register (alias of signup)
+URL: {{base_url}}/auth/register
+Body: same as /auth/signup
+
+A4. POST /auth/verify-otp
+URL: {{base_url}}/auth/verify-otp
+Body (JSON):
+{
+  "email": "john@example.com",
+  "otp": "123456"
+}
+
+A5. POST /login (backward compatible alias)
+URL: {{base_url}}/login
+Body: same as /auth/login
+
+A6. GET /auth/auth/google
+URL: {{base_url}}/auth/auth/google
+Body: none
+
+A7. GET /auth/auth/google/callback
+URL: {{base_url}}/auth/auth/google/callback
+Body: none
+
+A8. POST /auth/google
+URL: {{base_url}}/auth/google
+Body (JSON, OAuth token payload):
+{
+  "id_token": "google_id_token_here"
+}
+
+A9. POST /auth/facebook
+URL: {{base_url}}/auth/facebook
+Body (JSON):
+{
+  "access_token": "facebook_token_here"
+}
+
+A10. POST /auth/apple
+URL: {{base_url}}/auth/apple
+Body (JSON):
+{
+  "identity_token": "apple_identity_token_here"
+}
+
+A11. POST /auth/oauth/challenge
+URL: {{base_url}}/auth/oauth/challenge
+Body (JSON):
+{
+  "provider": "google"
+}
+
+A12. POST /google-login
+URL: {{base_url}}/google-login
+Body: provider-specific social login payload
+
+A13. POST /auth/logout (Protected)
+URL: {{base_url}}/auth/logout
+Body: none
+
+============================================================
+B) PROFILE APIs (Protected)
+============================================================
+
+B1. GET /me
+URL: {{base_url}}/me
+Body: none
+
+B2. GET /profile/edit
+URL: {{base_url}}/profile/edit
+Body: none
+
+B3. POST /profile/edit
+URL: {{base_url}}/profile/edit
+Body (JSON/form-data, profile fields):
+{
+  "first_name": "Sami",
+  "last_name": "Ullah",
+  "phone": "+923001112233"
+}
+
+B4. PUT /me/profile
+URL: {{base_url}}/me/profile
+Body (JSON):
+{
+  "first_name": "Sami",
+  "last_name": "Ullah",
+  "language": "en"
+}
+
+B5. PUT /me/agency
+URL: {{base_url}}/me/agency
+Body (JSON):
+{
+  "company_name": "My Agency",
+  "bio": "Professional broker",
+  "brn_number": "1232000"
+}
+
+B6. DELETE /me
+URL: {{base_url}}/me
+Body: none
+
+============================================================
+C) LISTING APIs (Protected)
+============================================================
+
+C1. GET /listings
+URL: {{base_url}}/listings
+Query params (supported):
+- status (exact by detail.form_data.status aliases like for sale, for rent, rent request)
+- listing_type (sale/rent/requirement)
+- off_plan (true/false or 1/0)
+- is_off_plan (true/false)
+- city (exact)
+- area (exact)
+- property_type (exact)
+- beds, min_beds, baths
+- min_price, max_price
+- tags (comma separated; ALL tags must exist now)
+- keyword (exact match search across configured fields)
+- page
+Body: none
+
+Example:
+{{base_url}}/listings?status=for sale&off_plan=true&city=Dubai&property_type=apartment&beds=3&min_price=1200000&max_price=8000000&tags=urgent,below market&keyword=dubai&page=1
+
+C2. GET /listings/search
+URL: {{base_url}}/listings/search
+Same filters/pagination as /listings
+
+C3. GET /listings/my
+URL: {{base_url}}/listings/my
+Body: none
+
+C4. GET /listings/add-post
+URL: {{base_url}}/listings/add-post
+Body: none
+
+C5. GET /listings/filters
+URL: {{base_url}}/listings/filters
+Body: none
+Returns filter metadata: cities, areas, all_cities, property_types, beds, baths, listing_types, tags, price hints, off_plan options.
+
+C6. POST /listings
+URL: {{base_url}}/listings
+Body (JSON sample):
+{
+  "listing_type": "sale",
+  "property_type": "apartment",
+  "city": "Dubai",
+  "area": "JLT",
+  "price": 1700000,
+  "beds": 3,
+  "baths": 4,
+  "is_off_plan": false,
+  "tags": ["URGENT", "EXCLUSIVE"],
+  "notes": "Sample notes",
+  "additional_notes": "Optional extra notes"
+}
+Note: endpoint also supports add-post style payloads and form-data media uploads.
+
+C7. POST /listings/add-post (alias to create)
+URL: {{base_url}}/listings/add-post
+Body: same as POST /listings
+
+C8. GET /listings/{listing}
+URL: {{base_url}}/listings/113
+Body: none
+
+C9. PUT /listings/{listing}
+URL: {{base_url}}/listings/113
+Body (JSON sample):
+{
+  "price": 1800000,
+  "beds": 3,
+  "notes": "Updated notes",
+  "additional_notes": "Updated additional notes"
+}
+
+C10. DELETE /listings/{listing}
+URL: {{base_url}}/listings/113
+Body: none
+
+C11. POST /listings/{listing}/mark-sold
+URL: {{base_url}}/listings/113/mark-sold
+Body: none
+
+C12. POST /listings/{listing}/mark-rented
+URL: {{base_url}}/listings/113/mark-rented
+Body: none
+
+============================================================
+D) FAVORITES APIs (Protected)
+============================================================
+
+D1. POST /listings/{listing}/favorite
+URL: {{base_url}}/listings/113/favorite
+Body: none
+
+D2. DELETE /listings/{listing}/favorite
+URL: {{base_url}}/listings/113/favorite
+Body: none
+
+D3. GET /favorites
+URL: {{base_url}}/favorites
+Body: none
+
+D4. POST /favorites
+URL: {{base_url}}/favorites
+Body (JSON):
+{
+  "listing_id": 113
+}
+
+D5. DELETE /favorites/{listing}
+URL: {{base_url}}/favorites/113
+Body: none
+
+============================================================
+E) LISTING REVIEWS APIs (Protected)
+============================================================
+
+E1. GET /listings/{listing}/reviews
+URL: {{base_url}}/listings/113/reviews
+Body: none
+
+E2. POST /listings/{listing}/reviews
+URL: {{base_url}}/listings/113/reviews
+Body (JSON):
+{
+  "rating": 5,
+  "review_text": "Excellent broker and listing."
+}
+
+E3. GET /listings/{listing}/reviews/me
+URL: {{base_url}}/listings/113/reviews/me
+Body: none
+
+E4. PUT /listings/{listing}/reviews/me
+URL: {{base_url}}/listings/113/reviews/me
+Body (JSON):
+{
+  "rating": 4,
+  "review_text": "Updated review"
+}
+
+E5. DELETE /listings/{listing}/reviews/me
+URL: {{base_url}}/listings/113/reviews/me
+Body: none
+
+============================================================
+F) COMMENTS APIs (Protected)
+============================================================
+
+F1. GET /listings/{listing}/comments
+URL: {{base_url}}/listings/113/comments
+Body: none
+
+F2. POST /listings/{listing}/comments
+URL: {{base_url}}/listings/113/comments
+Body (top-level comment):
+{
+  "body": "Nice listing"
+}
+Body (reply):
+{
+  "body": "Thanks for info",
+  "parent_id": 501
+}
+Note: reply only allowed to top-level comment.
+
+F3. GET /updates/{post}/comments
+URL: {{base_url}}/updates/55/comments
+Body: none
+
+F4. POST /updates/{post}/comments
+URL: {{base_url}}/updates/55/comments
+Body: same as listing comments
+
+F5. PUT /comments/{comment}
+URL: {{base_url}}/comments/501
+Body (JSON):
+{
+  "body": "Edited comment text"
+}
+
+F6. DELETE /comments/{comment}
+URL: {{base_url}}/comments/501
+Body: none
+
+============================================================
+G) LIKES APIs (Protected)
+============================================================
+
+G1. POST /listings/{listing}/likes
+URL: {{base_url}}/listings/113/likes
+Body: none
+
+G2. DELETE /listings/{listing}/likes
+URL: {{base_url}}/listings/113/likes
+Body: none
+
+G3. POST /updates/{post}/likes
+URL: {{base_url}}/updates/55/likes
+Body: none
+
+G4. DELETE /updates/{post}/likes
+URL: {{base_url}}/updates/55/likes
+Body: none
+
+G5. POST /comments/{comment}/likes
+URL: {{base_url}}/comments/501/likes
+Body: none
+
+G6. DELETE /comments/{comment}/likes
+URL: {{base_url}}/comments/501/likes
+Body: none
+
+============================================================
+H) SAVED SEARCH APIs (Protected)
+============================================================
+
+H1. GET /saved-searches
+URL: {{base_url}}/saved-searches
+Body: none
+
+H2. POST /saved-searches
+URL: {{base_url}}/saved-searches
+Body (recommended valid JSON):
+{
+  "name": "For Sale Saved Search",
+  "filters": {
+    "status": "for sale",
+    "off_plan": true,
+    "city": "Dubai",
+    "property_type": "apartment",
+    "beds": 3,
+    "min_price": 1200000,
+    "max_price": 8000000,
+    "tags": ["urgent", "below market"],
+    "keyword": "dubai"
+  },
+  "alerts_enabled": true
+}
+Note: parser also supports malformed key=value style filters, but proper JSON is strongly recommended.
+
+H3. GET /saved-searches/{savedSearch}
+URL: {{base_url}}/saved-searches/10
+Body: none
+
+H4. PUT /saved-searches/{savedSearch}
+URL: {{base_url}}/saved-searches/10
+Body (JSON sample):
+{
+  "name": "Updated Search Name",
+  "filters": {
+    "status": "for rent",
+    "city": "Dubai"
+  },
+  "alerts_enabled": false
+}
+
+H5. DELETE /saved-searches/{savedSearch}
+URL: {{base_url}}/saved-searches/10
+Body: none
+
+H6. POST /saved-searches/{savedSearch}/toggle-alerts
+URL: {{base_url}}/saved-searches/10/toggle-alerts
+Body: none
+
+H7. GET /saved-searches/{savedSearch}/run
+URL: {{base_url}}/saved-searches/10/run
+Optional query:
+- page=1
+Body: none
+Behavior: runs saved filters and returns same contract style as listing feed:
+- listings
+- pagination
+
+============================================================
+I) POSTS / UPDATES APIs (Protected)
+============================================================
+
+I1. GET /updates
+URL: {{base_url}}/updates
+Body: none
+
+I2. POST /updates
+URL: {{base_url}}/updates
+Body (multipart/form-data preferred for media):
+- content: "Market update text"
+- images[]: <file>
+- videos[]: <file>
+JSON-only sample:
+{
+  "content": "New market update"
+}
+
+============================================================
+J) AI APIs
+============================================================
+
+J1. POST /ai/product-listing-generator (Public)
+URL: {{base_url}}/ai/product-listing-generator
+Body:
+- multipart/form-data for file input:
+  - source_type: "pdf" | "image" | "text"
+  - input_text: <file> OR plain text
+- JSON for text input:
+{
+  "source_type": "text",
+  "input_text": "3BR apartment in JLT..."
+}
+
+J2. POST /ai/listings/parse-text (Protected)
+URL: {{base_url}}/ai/listings/parse-text
+Body (JSON):
+{
+  "input_text": "3BR apartment for sale in Dubai Marina..."
+}
+
+J3. POST /ai/listings/parse-image (Protected)
+URL: {{base_url}}/ai/listings/parse-image
+Body: multipart/form-data
+- image: <file>
+
+J4. POST /ai/listings/parse-voice (Protected)
+URL: {{base_url}}/ai/listings/parse-voice
+Body: multipart/form-data
+- audio: <file>
+
+============================================================
+K) ADMIN APIs
+============================================================
+Note: current routes are open (auth middleware commented note in routes file). You can secure later with auth:sanctum + admin middleware.
+
+K1. GET /admin/dashboard
+URL: {{base_url}}/admin/dashboard
+
+K2. GET /admin/brokers
+URL: {{base_url}}/admin/brokers
+
+K3. PUT /admin/brokers/{user}/status
+URL: {{base_url}}/admin/brokers/18/status
+Body (JSON):
+{
+  "status": "active"
+}
+
+K4. POST /admin/brokers/{user}/toggle-verified
+URL: {{base_url}}/admin/brokers/18/toggle-verified
+Body: none
+
+K5. GET /admin/listings
+URL: {{base_url}}/admin/listings?page=1
+Body: none
+
+K6. DELETE /admin/listings/{listing}
+URL: {{base_url}}/admin/listings/113
+Body: none
+
+K7. POST /admin/listings/{listing}/mark-inactive
+URL: {{base_url}}/admin/listings/113/mark-inactive
+Body: none
+
+K8. GET /admin/posts
+URL: {{base_url}}/admin/posts
+Body: none
+
+K9. POST /admin/posts
+URL: {{base_url}}/admin/posts
+Body (JSON/form-data):
+{
+  "content": "Admin post text"
+}
+Media optional: images[] and videos[]
+
+K10. PUT /admin/posts/{post}
+URL: {{base_url}}/admin/posts/55
+Body (JSON):
+{
+  "content": "Updated admin post text"
+}
+
+K11. DELETE /admin/posts/{post}
+URL: {{base_url}}/admin/posts/55
+Body: none
+
+============================================================
+L) QUICK POSTMAN CHECKLIST
+============================================================
+
+1) For protected APIs always add Bearer token.
+2) Use valid JSON (double quotes, key:value syntax), not key=value inside JSON object.
+3) For file endpoints, switch to form-data.
+4) For saved searches, recommended filters payload:
+{
+  "status": "for sale",
+  "off_plan": true,
+  "city": "Dubai",
+  "property_type": "apartment",
+  "beds": 3,
+  "min_price": 1200000,
+  "max_price": 8000000,
+  "tags": ["urgent", "below market"],
+  "keyword": "dubai"
+}
+

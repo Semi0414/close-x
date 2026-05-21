@@ -13,7 +13,12 @@ class ListingCommentController extends Controller
     {
         $query = Comment::with([
             'user:id,name,first_name,last_name,profile_photo',
-            'replies.user:id,name,first_name,last_name,profile_photo',
+            'replies' => function ($replyQuery) {
+                $replyQuery
+                    ->with('user:id,name,first_name,last_name,profile_photo')
+                    ->withCount('likes')
+                    ->orderBy('created_at');
+            },
         ])
             ->withCount('likes')
             ->where('commentable_type', 'listing')
@@ -37,16 +42,30 @@ class ListingCommentController extends Controller
             Comment::where('id', $data['parent_id'])
                 ->where('commentable_type', 'listing')
                 ->where('commentable_id', $listing->id)
+                ->whereNull('parent_id')
                 ->firstOrFail();
         }
 
-        $comment = Comment::create([
+        $payload = [
             'user_id' => $user->id,
             'commentable_type' => 'listing',
             'commentable_id' => $listing->id,
             'parent_id' => $data['parent_id'] ?? null,
-            'body' => $data['body'],
-        ]);
+            'body' => trim($data['body']),
+        ];
+
+        // Prevent immediate double-submit duplicates from clients.
+        $comment = Comment::where('user_id', $payload['user_id'])
+            ->where('commentable_type', $payload['commentable_type'])
+            ->where('commentable_id', $payload['commentable_id'])
+            ->where('parent_id', $payload['parent_id'])
+            ->where('body', $payload['body'])
+            ->where('created_at', '>=', now()->subSeconds(3))
+            ->first();
+
+        if (!$comment) {
+            $comment = Comment::create($payload);
+        }
 
         return response()->json(
             $comment->load(['user:id,name,first_name,last_name,profile_photo'])->loadCount('likes'),
