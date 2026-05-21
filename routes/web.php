@@ -14,5 +14,13 @@ use Illuminate\Support\Facades\Route;
 */
 
 Route::get('/', function () {
-    return view('welcome');
+    $path = resource_path('views/closex/home.html');
+
+    if (!is_file($path)) {
+        abort(404, 'Home page not found.');
+    }
+
+    return response(file_get_contents($path), 200, [
+        'Content-Type' => 'text/html; charset=UTF-8',
+    ]);
 });
