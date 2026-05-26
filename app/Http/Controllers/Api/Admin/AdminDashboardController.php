@@ -14,8 +14,8 @@ class AdminDashboardController extends Controller
         $totalUsers = User::count();
         $totalListings = Listing::count();
         $activeListings = Listing::where('status', 'active')->count();
-        $soldListings = Listing::where('status', 'sold')->count();
-        $rentedListings = Listing::where('status', 'rented')->count();
+        $soldListings = Listing::where('marked_as', 'sold')->count();
+        $rentedListings = Listing::where('marked_as', 'rented')->count();
 
         $mostActiveBrokers = User::withCount('listings')
             ->orderByDesc('listings_count')

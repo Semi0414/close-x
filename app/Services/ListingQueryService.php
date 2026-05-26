@@ -3,11 +3,17 @@
 namespace App\Services;
 
 use App\Models\Listing;
+use App\Support\ListingFormDataNormalizer;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 
 class ListingQueryService
 {
+    public function __construct(
+        private ListingFormDataNormalizer $formDataNormalizer
+    ) {
+    }
+
     /**
      * Base query for public active listings with common relations & aggregates.
      */
@@ -19,7 +25,8 @@ class ListingQueryService
             ->with(['creator.brokerProfile', 'media', 'detail']);
 
         if ($activeOnly) {
-            $query->where('status', 'active');
+            $query->where('status', 'active')
+                ->whereNull('marked_as');
         }
 
         $query
@@ -43,10 +50,50 @@ class ListingQueryService
 
     public function applyFilters(Builder $query, Request $request): Builder
     {
-        $filters = $request->all();
-        $this->applyFiltersArray($query, $filters);
+        $this->applyFiltersArray($query, $this->resolveListingFiltersFromRequest($request));
 
         return $query;
+    }
+
+    /**
+     * Flat query params and nested ?filters[city]=… or ?filters={"city":"Dubai"}.
+     *
+     * @return array<string, mixed>
+     */
+    public function resolveListingFiltersFromRequest(Request $request): array
+    {
+        $filters = array_merge(
+            $request->query(),
+            $request->request->all()
+        );
+        unset($filters['page']);
+
+        if ($request->isJson()) {
+            $json = $request->json()->all();
+            if (is_array($json)) {
+                $filters = array_merge($filters, $json);
+            }
+        }
+
+        foreach (['filters', 'filter', 'data', 'params'] as $containerKey) {
+            if (!isset($filters[$containerKey])) {
+                continue;
+            }
+
+            $nested = $filters[$containerKey];
+            unset($filters[$containerKey]);
+
+            if (is_string($nested)) {
+                $decoded = json_decode($nested, true);
+                $nested = json_last_error() === JSON_ERROR_NONE && is_array($decoded) ? $decoded : [];
+            }
+
+            if (is_array($nested)) {
+                $filters = array_merge($filters, $nested);
+            }
+        }
+
+        return $this->normalizeFilterPayload($filters);
     }
 
     /**
@@ -54,135 +101,60 @@ class ListingQueryService
      */
     public function applyFiltersArray(Builder $query, array $filters): void
     {
-        if (!empty($filters['status'])) {
-            $statusAliases = $this->listingTypeAliases(
-                $this->normalizeListingTypeFilterValues((string) $filters['status'])
-            );
-
-            $query->whereHas('detail', function (Builder $detailQuery) use ($statusAliases) {
-                $detailQuery->where(function (Builder $statusQuery) use ($statusAliases) {
-                    foreach ($statusAliases as $alias) {
-                        $statusQuery->orWhereRaw(
-                            "LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.status')))) = ?",
-                            [$alias]
-                        );
-                    }
-                });
-            });
+        if ($this->hasFilterValue($filters, 'status')) {
+            $this->applyListingIntentFilter($query, (string) $filters['status']);
+        } elseif ($this->hasFilterValue($filters, 'listing_type')) {
+            $this->applyListingIntentFilter($query, (string) $filters['listing_type']);
         }
 
-        if (!empty($filters['listing_type']) && empty($filters['status'])) {
-            $normalizedTypes = $this->normalizeListingTypeFilterValues((string) $filters['listing_type']);
-            $typeAliases = $this->listingTypeAliases($normalizedTypes);
-            $allTypeAliases = $this->listingTypeAliases(['sale', 'rent', 'requirement']);
-
-            $query->where(function (Builder $typeQuery) use ($normalizedTypes, $typeAliases, $allTypeAliases) {
-                $typeQuery->whereHas('detail', function (Builder $detailQuery) use ($typeAliases) {
-                    $detailQuery->where(function (Builder $statusQuery) use ($typeAliases) {
-                        foreach ($typeAliases as $alias) {
-                            $statusQuery
-                                ->orWhereRaw(
-                                    "LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.status')))) = ?",
-                                    [$alias]
-                                )
-                                ->orWhereRaw(
-                                    "LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(extra, '$.kind')))) = ?",
-                                    [$alias]
-                                );
-                        }
-                    });
-                })->orWhere(function (Builder $fallbackTypeQuery) use ($normalizedTypes, $allTypeAliases) {
-                    $fallbackTypeQuery
-                        ->whereIn('listing_type', $normalizedTypes)
-                        ->whereDoesntHave('detail', function (Builder $detailQuery) use ($allTypeAliases) {
-                            $detailQuery->where(function (Builder $statusQuery) use ($allTypeAliases) {
-                                foreach ($allTypeAliases as $alias) {
-                                    $statusQuery
-                                        ->orWhereRaw(
-                                            "LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.status')))) = ?",
-                                            [$alias]
-                                        )
-                                        ->orWhereRaw(
-                                            "LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(extra, '$.kind')))) = ?",
-                                            [$alias]
-                                        );
-                                }
-                            });
-                        });
-                });
-            });
+        if ($this->hasFilterValue($filters, 'city')) {
+            $this->applyLikeFilterOnListingOrFormData($query, (string) $filters['city'], [
+                'city',
+            ]);
         }
 
-        if (!empty($filters['city'])) {
-            $query->whereRaw('LOWER(TRIM(city)) = ?', [strtolower(trim((string) $filters['city']))]);
+        if ($this->hasFilterValue($filters, 'area')) {
+            $this->applyLikeFilterOnListingOrFormData($query, (string) $filters['area'], [
+                'area',
+            ]);
         }
 
-        if (!empty($filters['area'])) {
-            $query->whereRaw('LOWER(TRIM(area)) = ?', [strtolower(trim((string) $filters['area']))]);
+        if ($this->hasFilterValue($filters, 'property_type')) {
+            $this->applyLikeFilterOnListingOrFormData($query, (string) $filters['property_type'], [
+                'property_type',
+            ]);
         }
 
-        if (!empty($filters['property_type'])) {
-            $query->whereRaw('LOWER(TRIM(property_type)) = ?', [strtolower(trim((string) $filters['property_type']))]);
+        if ($this->hasFilterValue($filters, 'min_price')) {
+            $query->whereRaw($this->effectiveListingPriceSql() . ' >= ?', [(float) $filters['min_price']]);
         }
 
-        if (isset($filters['min_price']) && $filters['min_price'] !== '' && $filters['min_price'] !== null) {
-            $query->where(function (Builder $priceQuery) use ($filters) {
-                $priceQuery->where('price', '>=', $filters['min_price'])
-                    ->orWhereHas('detail', function (Builder $detailQuery) use ($filters) {
-                        $detailQuery->whereRaw(
-                            "CAST(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.price.sp')) AS DECIMAL(15,2)) >= ?",
-                            [(float) $filters['min_price']]
-                        );
-                    });
-            });
+        if ($this->hasFilterValue($filters, 'max_price')) {
+            $query->whereRaw($this->effectiveListingPriceSql() . ' <= ?', [(float) $filters['max_price']]);
         }
 
-        if (isset($filters['max_price']) && $filters['max_price'] !== '' && $filters['max_price'] !== null) {
-            $query->where(function (Builder $priceQuery) use ($filters) {
-                $priceQuery->where('price', '<=', $filters['max_price'])
-                    ->orWhereHas('detail', function (Builder $detailQuery) use ($filters) {
-                        $detailQuery->whereRaw(
-                            "CAST(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.price.sp')) AS DECIMAL(15,2)) <= ?",
-                            [(float) $filters['max_price']]
-                        );
-                    });
-            });
+        if ($this->hasFilterValue($filters, 'min_beds')) {
+            $query->whereRaw($this->effectiveListingBedsSql() . ' >= ?', [(int) $filters['min_beds']]);
         }
 
-        if (isset($filters['beds']) && $filters['beds'] !== '' && $filters['beds'] !== null) {
-            $query->where(function (Builder $bedsQuery) use ($filters) {
-                $bedsQuery->where('beds', $filters['beds'])
-                    ->orWhereHas('detail', function (Builder $detailQuery) use ($filters) {
-                        $detailQuery->whereRaw(
-                            "CAST(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.rooms.bedrooms')) AS UNSIGNED) = ?",
-                            [(int) $filters['beds']]
-                        );
-                    });
-            });
+        if ($this->hasFilterValue($filters, 'beds')) {
+            $query->whereRaw($this->effectiveListingBedsSql() . ' = ?', [(int) $filters['beds']]);
         }
 
-        if (isset($filters['min_beds']) && $filters['min_beds'] !== '' && $filters['min_beds'] !== null) {
-            $query->where(function (Builder $bedsQuery) use ($filters) {
-                $bedsQuery->where('beds', '>=', $filters['min_beds'])
-                    ->orWhereHas('detail', function (Builder $detailQuery) use ($filters) {
-                        $detailQuery->whereRaw(
-                            "CAST(JSON_UNQUOTE(JSON_EXTRACT(form_data, '$.rooms.bedrooms')) AS UNSIGNED) >= ?",
-                            [(int) $filters['min_beds']]
-                        );
-                    });
-            });
+        if ($this->hasFilterValue($filters, 'baths')) {
+            $query->where('baths', (int) $filters['baths']);
         }
 
-        if (isset($filters['baths']) && $filters['baths'] !== '' && $filters['baths'] !== null) {
-            $query->where('baths', $filters['baths']);
-        }
-
-        if (array_key_exists('is_off_plan', $filters) && $filters['is_off_plan'] !== null && $filters['is_off_plan'] !== '') {
+        if ($this->hasFilterValue($filters, 'is_off_plan')) {
             $query->where('is_off_plan', filter_var($filters['is_off_plan'], FILTER_VALIDATE_BOOLEAN));
         }
 
-        if (array_key_exists('off_plan', $filters) && $filters['off_plan'] !== null && $filters['off_plan'] !== '') {
-            $query->where('is_off_plan', filter_var($filters['off_plan'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? (bool) (int) $filters['off_plan']);
+        if ($this->hasFilterValue($filters, 'off_plan')) {
+            $query->where(
+                'is_off_plan',
+                filter_var($filters['off_plan'], FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE)
+                    ?? (bool) (int) $filters['off_plan']
+            );
         }
 
         $tags = $filters['tags'] ?? null;
@@ -190,63 +162,273 @@ class ListingQueryService
             $tags = array_filter(array_map('trim', explode(',', $tags)));
         }
         if (is_array($tags) && count($tags) > 0) {
-            foreach ($tags as $tag) {
-                if (!is_string($tag) || $tag === '') {
-                    continue;
-                }
-                $normalized = strtoupper(trim($tag));
-                $query->whereJsonContains('tags', $normalized);
-            }
-        }
+            $query->where(function (Builder $tagQuery) use ($tags) {
+                foreach ($tags as $tag) {
+                    if (!is_string($tag) || trim($tag) === '') {
+                        continue;
+                    }
 
-        if (!empty($filters['keyword'])) {
-            $rawKeyword = trim((string) $filters['keyword']);
-            $keyword = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower($rawKeyword)) . '%';
+                    $normalized = strtoupper(trim($tag));
+                    $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower($normalized)) . '%';
 
-            $query->where(function (Builder $q) use ($keyword, $rawKeyword) {
-                $q->whereRaw('LOWER(property_type) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(listing_type) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(status) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(area) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(city) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(project) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(developer) LIKE ?', [$keyword])
-                    ->orWhereHas('detail', function (Builder $dq) use ($keyword) {
-                        $dq->whereRaw('LOWER(COALESCE(notes, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(additional_notes, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(payment_plan, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(ownership, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(furnished, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(form_data, "$.title")), "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(form_data, "$.status")), "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(form_data, "$.property_type")), "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(form_data, "$.plot_location")), "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(JSON_UNQUOTE(JSON_EXTRACT(extra, "$.kind")), "")) LIKE ?', [$keyword]);
-                    })
-                    ->orWhereHas('creator', function (Builder $cq) use ($keyword) {
-                        $cq->whereRaw('LOWER(COALESCE(name, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(first_name, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(last_name, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(phone, "")) LIKE ?', [$keyword])
-                            ->orWhereRaw('LOWER(COALESCE(email, "")) LIKE ?', [$keyword])
-                            ->orWhereHas('brokerProfile', function (Builder $bpq) use ($keyword) {
-                                $bpq->whereRaw('LOWER(COALESCE(company_name, "")) LIKE ?', [$keyword])
-                                    ->orWhereRaw('LOWER(COALESCE(bio, "")) LIKE ?', [$keyword])
-                                    ->orWhereRaw('LOWER(COALESCE(brn_number, "")) LIKE ?', [$keyword]);
+                    $tagQuery->orWhere(function (Builder $match) use ($normalized, $like) {
+                        $match->whereJsonContains('tags', $normalized)
+                            ->orWhereHas('detail', function (Builder $detailQuery) use ($like) {
+                                $detailQuery->whereRaw(
+                                    'LOWER(COALESCE(CAST(form_data AS CHAR), "")) LIKE ?',
+                                    [$like]
+                                );
                             });
-                    })
-                    ->orWhereHas('listingReviews', function (Builder $rq) use ($keyword) {
-                        $rq->whereRaw('LOWER(COALESCE(review_text, "")) LIKE ?', [$keyword]);
-                    });
-
-                if ($rawKeyword !== '') {
-                    $q->orWhereJsonContains('tags', strtoupper($rawKeyword));
-                    $q->orWhereHas('detail', function (Builder $dq) use ($rawKeyword) {
-                        $dq->whereRaw('JSON_SEARCH(form_data, "one", ?, NULL, "$.tags[*]") IS NOT NULL', [$rawKeyword]);
                     });
                 }
             });
         }
+
+        $searchTerm = $filters['keyword'] ?? $filters['q'] ?? $filters['search'] ?? null;
+        if (is_string($searchTerm) && trim($searchTerm) !== '') {
+            $this->applyKeywordFilter($query, trim($searchTerm));
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $filters
+     */
+    private function normalizeFilterPayload(array $filters): array
+    {
+        $keyAliases = [
+            'propertyType' => 'property_type',
+            'property_type' => 'property_type',
+            'listingType' => 'listing_type',
+            'listing_type' => 'listing_type',
+            'minPrice' => 'min_price',
+            'maxPrice' => 'max_price',
+            'offPlan' => 'off_plan',
+            'isOffPlan' => 'is_off_plan',
+            'minBeds' => 'min_beds',
+            'min_beds' => 'min_beds',
+            'location' => 'city',
+            'keyword' => 'keyword',
+        ];
+
+        $normalized = [];
+
+        foreach ($filters as $key => $value) {
+            $key = $keyAliases[$key] ?? $key;
+
+            if ($this->shouldSkipFilterValue($value)) {
+                continue;
+            }
+
+            $normalized[$key] = $value;
+        }
+
+        foreach (['tab', 'category', 'type'] as $tabKey) {
+            if (!$this->hasFilterValue($normalized, $tabKey)) {
+                continue;
+            }
+
+            $mapped = $this->mapUiTabToStatusFilter((string) $normalized[$tabKey]);
+            unset($normalized[$tabKey]);
+
+            if ($mapped !== null && !$this->hasFilterValue($normalized, 'status')) {
+                $normalized['status'] = $mapped;
+            }
+        }
+
+        // Mobile "Min Beds" dropdown usually sends `beds` but means minimum (>=), not exact match.
+        if ($this->hasFilterValue($normalized, 'beds') && !$this->hasFilterValue($normalized, 'min_beds')) {
+            $bedsExact = filter_var($normalized['beds_exact'] ?? false, FILTER_VALIDATE_BOOLEAN);
+            if (!$bedsExact) {
+                $normalized['min_beds'] = $normalized['beds'];
+                unset($normalized['beds']);
+            }
+        }
+
+        unset($normalized['beds_exact']);
+
+        return $normalized;
+    }
+
+    private function mapUiTabToStatusFilter(string $tab): ?string
+    {
+        $normalized = strtolower(trim(str_replace('_', ' ', $tab)));
+
+        return match ($normalized) {
+            'all', '' => null,
+            'for sale', 'sale' => 'for sale',
+            'for rent', 'rent' => 'for rent',
+            'buy request', 'buy_request' => 'buy request',
+            'rent request', 'rent_request' => 'rent request',
+            default => $tab,
+        };
+    }
+
+    private function shouldSkipFilterValue(mixed $value): bool
+    {
+        if ($value === null) {
+            return true;
+        }
+
+        if (is_string($value)) {
+            $trimmed = strtolower(trim($value));
+
+            return $trimmed === ''
+                || in_array($trimmed, ['all', 'any', 'null', 'undefined', 'none'], true);
+        }
+
+        if (is_array($value) && $value === []) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  array<string, mixed>  $filters
+     */
+    private function hasFilterValue(array $filters, string $key): bool
+    {
+        return array_key_exists($key, $filters) && !$this->shouldSkipFilterValue($filters[$key]);
+    }
+
+    /**
+     * Match sale / rent / requirement from listings.listing_type or detail form_data / extra.
+     */
+    private function applyListingIntentFilter(Builder $query, string $rawValue): void
+    {
+        $normalizedTypes = $this->normalizeListingTypeFilterValues($rawValue);
+        $typeAliases = $this->listingTypeAliases($normalizedTypes);
+
+        $query->where(function (Builder $outer) use ($normalizedTypes, $typeAliases) {
+            $outer->whereIn('listing_type', $normalizedTypes);
+
+            if ($typeAliases === []) {
+                return;
+            }
+
+            $outer->orWhereHas('detail', function (Builder $detailQuery) use ($typeAliases) {
+                $detailQuery->where(function (Builder $match) use ($typeAliases) {
+                    foreach ($typeAliases as $alias) {
+                        $like = '%' . str_replace(['%', '_'], ['\\%', '\\_'], $alias) . '%';
+                        $match
+                            ->orWhereRaw(
+                                'LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(form_data, "$.kind")))) LIKE ?',
+                                [$like]
+                            )
+                            ->orWhereRaw(
+                                'LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(form_data, "$.status")))) LIKE ?',
+                                [$like]
+                            )
+                            ->orWhereRaw(
+                                'LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(extra, "$.kind")))) LIKE ?',
+                                [$like]
+                            )
+                            ->orWhereRaw('LOWER(COALESCE(CAST(form_data AS CHAR), "")) LIKE ?', [$like]);
+                    }
+                });
+            });
+        });
+    }
+
+    /**
+     * COALESCE(listings.price, form_data price-sp, scalar form_data price).
+     */
+    private function effectiveListingPriceSql(): string
+    {
+        return 'COALESCE(
+            listings.price,
+            (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(ld.form_data, "$.price.sp")) AS DECIMAL(15,2))
+                FROM listing_details ld WHERE ld.listing_id = listings.id LIMIT 1),
+            (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(ld.form_data, "$.price")) AS DECIMAL(15,2))
+                FROM listing_details ld WHERE ld.listing_id = listings.id LIMIT 1)
+        )';
+    }
+
+    /**
+     * COALESCE(listings.beds, form_data rooms.bedrooms / beds).
+     */
+    private function effectiveListingBedsSql(): string
+    {
+        return 'COALESCE(
+            listings.beds,
+            (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(ld.form_data, "$.rooms.bedrooms")) AS UNSIGNED)
+                FROM listing_details ld WHERE ld.listing_id = listings.id LIMIT 1),
+            (SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(ld.form_data, "$.beds")) AS UNSIGNED)
+                FROM listing_details ld WHERE ld.listing_id = listings.id LIMIT 1)
+        )';
+    }
+
+    /**
+     * @param  list<string>  $listingColumns
+     */
+    private function applyLikeFilterOnListingOrFormData(Builder $query, string $value, array $listingColumns): void
+    {
+        $needle = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower(trim($value))) . '%';
+
+        $query->where(function (Builder $outer) use ($listingColumns, $needle) {
+            foreach ($listingColumns as $column) {
+                $outer->orWhereRaw("LOWER(COALESCE({$column}, '')) LIKE ?", [$needle]);
+            }
+
+            $outer->orWhereHas('detail', function (Builder $detailQuery) use ($needle) {
+                $detailQuery->whereRaw('LOWER(COALESCE(CAST(form_data AS CHAR), "")) LIKE ?', [$needle]);
+            });
+        });
+    }
+
+    /**
+     * Full-text style match across listings, listing_details.form_data, broker, and reviews.
+     */
+    private function applyKeywordFilter(Builder $query, string $rawKeyword): void
+    {
+        $keyword = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower($rawKeyword)) . '%';
+        $exactTag = strtoupper($rawKeyword);
+
+        $query->where(function (Builder $q) use ($keyword, $rawKeyword, $exactTag) {
+            $q->whereRaw('LOWER(COALESCE(property_type, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(listing_type, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(area, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(city, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(project, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(developer, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(currency, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(marked_as, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('CAST(COALESCE(price, 0) AS CHAR) LIKE ?', [$keyword])
+                ->orWhereRaw('CAST(COALESCE(beds, 0) AS CHAR) LIKE ?', [$keyword])
+                ->orWhereRaw('CAST(COALESCE(baths, 0) AS CHAR) LIKE ?', [$keyword])
+                ->orWhereRaw('CAST(COALESCE(size, 0) AS CHAR) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(CAST(tags AS CHAR), "")) LIKE ?', [$keyword])
+                ->orWhereJsonContains('tags', $exactTag);
+
+            if (ctype_digit($rawKeyword)) {
+                $q->orWhere('listings.id', (int) $rawKeyword);
+            }
+
+            $q->orWhereHas('detail', function (Builder $dq) use ($keyword) {
+                $dq->whereRaw('LOWER(COALESCE(notes, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(additional_notes, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(payment_plan, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(ownership, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(furnished, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(CAST(form_data AS CHAR), "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(CAST(extra AS CHAR), "")) LIKE ?', [$keyword]);
+            })
+                ->orWhereHas('creator', function (Builder $cq) use ($keyword) {
+                    $cq->whereRaw('LOWER(COALESCE(name, "")) LIKE ?', [$keyword])
+                        ->orWhereRaw('LOWER(COALESCE(first_name, "")) LIKE ?', [$keyword])
+                        ->orWhereRaw('LOWER(COALESCE(last_name, "")) LIKE ?', [$keyword])
+                        ->orWhereRaw('LOWER(COALESCE(phone, "")) LIKE ?', [$keyword])
+                        ->orWhereRaw('LOWER(COALESCE(email, "")) LIKE ?', [$keyword])
+                        ->orWhereHas('brokerProfile', function (Builder $bpq) use ($keyword) {
+                            $bpq->whereRaw('LOWER(COALESCE(company_name, "")) LIKE ?', [$keyword])
+                                ->orWhereRaw('LOWER(COALESCE(bio, "")) LIKE ?', [$keyword])
+                                ->orWhereRaw('LOWER(COALESCE(brn_number, "")) LIKE ?', [$keyword]);
+                        });
+                })
+                ->orWhereHas('listingReviews', function (Builder $rq) use ($keyword) {
+                    $rq->whereRaw('LOWER(COALESCE(review_text, "")) LIKE ?', [$keyword]);
+                });
+        });
     }
 
     /**
@@ -259,7 +441,8 @@ class ListingQueryService
         return match ($value) {
             'for sale', 'sale' => ['sale'],
             'for rent', 'rent' => ['rent'],
-            'rent request', 'sale request', 'requirement', 'required', 'wanted' => ['requirement'],
+            'rent request', 'sale request', 'requirement', 'required', 'wanted',
+            'buy request', 'buy_request' => ['requirement'],
             default => [$value],
         };
     }
@@ -276,7 +459,14 @@ class ListingQueryService
             $typeAliases = match ($type) {
                 'sale' => ['sale', 'for sale'],
                 'rent' => ['rent', 'for rent'],
-                'requirement' => ['requirement', 'rent request', 'sale request', 'required', 'wanted'],
+                'requirement' => [
+                    'requirement',
+                    'rent request',
+                    'sale request',
+                    'buy request',
+                    'required',
+                    'wanted',
+                ],
                 default => [$type],
             };
 
@@ -306,6 +496,16 @@ class ListingQueryService
         $listing->setAttribute('likes_count', (int) $listing->getAttribute('likes_count'));
         $listing->setAttribute('comments_count', (int) $listing->getAttribute('comments_count'));
         $listing->setAttribute('ratings_count', (int) $listing->getAttribute('ratings_count'));
+
+        if ($listing->relationLoaded('detail') && $listing->detail !== null) {
+            $formData = $listing->detail->form_data;
+            if (is_array($formData) && $formData !== []) {
+                $listing->detail->setAttribute(
+                    'form_data',
+                    $this->formDataNormalizer->normalize($formData)
+                );
+            }
+        }
     }
 
     public function transformPaginatorCollection(\Illuminate\Contracts\Pagination\LengthAwarePaginator $paginator, ?\App\Models\User $user): void

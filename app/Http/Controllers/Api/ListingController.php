@@ -6,17 +6,24 @@ use App\Http\Controllers\Controller;
 use App\Models\Listing;
 use App\Models\ListingDetail;
 use App\Models\ListingMedia;
+use App\Services\ListingMetricsService;
 use App\Services\ListingQueryService;
+use App\Support\CompactCountFormatter;
+use App\Support\ListingFormDataNormalizer;
 use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class ListingController extends Controller
 {
     public function __construct(
-        private ListingQueryService $listingQuery
+        private ListingQueryService $listingQuery,
+        private ListingMetricsService $metricsService,
+        private ListingFormDataNormalizer $formDataNormalizer
     ) {
     }
 
@@ -25,7 +32,12 @@ class ListingController extends Controller
      */
     public function index(Request $request)
     {
-        return $this->paginatedListings($request, true);
+        return $this->paginatedListings(
+            $request,
+            true,
+            false,
+            $this->requestHasListingFilters($request)
+        );
     }
 
     /**
@@ -33,13 +45,25 @@ class ListingController extends Controller
      */
     public function search(Request $request)
     {
-        return $this->paginatedListings($request, true);
+        return $this->paginatedListings(
+            $request,
+            true,
+            true,
+            $this->requestHasListingFilters($request)
+        );
     }
 
-    private function paginatedListings(Request $request, bool $activeOnly)
+    private function paginatedListings(
+        Request $request,
+        bool $activeOnly,
+        bool $withEmptySearchMessage = false,
+        bool $withEmptyFilterMessage = false
+    )
     {
+        $appliedFilters = $this->listingQuery->resolveListingFiltersFromRequest($request);
+
         $query = $this->listingQuery->baseListingQuery($request, $activeOnly);
-        $this->listingQuery->applyFilters($query, $request);
+        $this->listingQuery->applyFiltersArray($query, $appliedFilters);
         $query->orderByDesc('created_at');
 
         $requestedPage = max(1, (int) $request->query('page', 1));
@@ -50,8 +74,9 @@ class ListingController extends Controller
 
         $this->listingQuery->transformPaginatorCollection($paginator, $request->user());
 
-        return response()->json([
+        $payload = [
             'listings' => $paginator->items(),
+            'applied_filters' => $appliedFilters,
             'pagination' => [
                 'current_page' => $paginator->currentPage(),
                 'last_page' => $paginator->lastPage(),
@@ -61,7 +86,33 @@ class ListingController extends Controller
                 'to' => $paginator->lastItem(),
                 'has_more_pages' => $paginator->hasMorePages(),
             ],
-        ]);
+        ];
+
+        if ($paginator->total() === 0) {
+            $searchTerm = trim((string) (
+                $request->query('keyword')
+                ?? $request->query('q')
+                ?? $request->query('search')
+                ?? ''
+            ));
+
+            if ($withEmptySearchMessage && $searchTerm !== '') {
+                $payload['message'] = 'No listings found matching your search.';
+            } elseif ($withEmptyFilterMessage || ($withEmptySearchMessage && $this->requestHasListingFilters($request))) {
+                $payload['message'] = 'No listings found for the selected filters.';
+            } elseif ($withEmptySearchMessage) {
+                $payload['message'] = 'No listings found.';
+            } elseif ($withEmptyFilterMessage) {
+                $payload['message'] = 'No listings found for the selected filters.';
+            }
+        }
+
+        return response()->json($payload);
+    }
+
+    private function requestHasListingFilters(Request $request): bool
+    {
+        return $this->listingQuery->resolveListingFiltersFromRequest($request) !== [];
     }
 
     /**
@@ -70,6 +121,7 @@ class ListingController extends Controller
     public function addPostForm()
     {
         return response()->json([
+            'notes' => null,
             'additional_notes' => null,
         ]);
     }
@@ -81,10 +133,18 @@ class ListingController extends Controller
     {
         $listingId = $listing->id;
 
-        $this->listingQuery->baseListingQuery($request, false)
+        $listingForView = $this->listingQuery->baseListingQuery($request, false)
             ->whereKey($listingId)
-            ->firstOrFail()
-            ->increment('views_count');
+            ->firstOrFail();
+
+        $viewer = $request->user();
+        if ($viewer && $viewer->id !== $listingForView->created_by) {
+            $this->metricsService->recordFromUser(
+                $listingForView,
+                $viewer->id,
+                \App\Models\ListingMetricEvent::METRIC_VIEW
+            );
+        }
 
         $listing = $this->listingQuery->baseListingQuery($request, false)
             ->whereKey($listingId)
@@ -143,6 +203,8 @@ class ListingController extends Controller
                     $data = $this->applyFormDataToListingPayload($data, $itemFormData);
                 }
 
+                $this->stripBlankOptionalNotes($data, $itemFormData);
+
                 $createdListings[] = $this->createListingFromPayload(
                     $request,
                     $user->id,
@@ -180,63 +242,77 @@ class ListingController extends Controller
     }
 
     /**
-     * Update listing (owner only).
+     * Get listing data for edit screen (owner only).
      */
-    public function update(Request $request, Listing $listing)
+    public function edit(Request $request, Listing $listing): JsonResponse
     {
         $this->authorizeListing($request, $listing);
 
-        $data = $request->validate([
-            'property_type' => 'sometimes|string|max:255',
-            'price' => 'sometimes|nullable|numeric',
-            'currency' => 'sometimes|nullable|string|max:10',
-            'size' => 'sometimes|nullable|numeric',
-            'beds' => 'sometimes|nullable|integer|min:0',
-            'baths' => 'sometimes|nullable|integer|min:0',
-            'area' => 'sometimes|nullable|string|max:255',
-            'city' => 'sometimes|nullable|string|max:255',
-            'project' => 'sometimes|nullable|string|max:255',
-            'developer' => 'sometimes|nullable|string|max:255',
-            'is_off_plan' => 'sometimes|boolean',
-            'tags' => 'sometimes|array',
-            'expires_at' => 'sometimes|nullable|date',
+        $listing = $this->listingQuery->baseListingQuery($request, false)
+            ->whereKey($listing->id)
+            ->firstOrFail();
 
-            // details
-            'payment_plan' => 'sometimes|nullable|string',
-            'ownership' => 'sometimes|nullable|string|max:255',
-            'furnished' => 'sometimes|nullable|in:furnished,unfurnished,semi',
-            'commission' => 'sometimes|nullable|numeric',
-            'roi' => 'sometimes|nullable|numeric',
-            'notes' => 'sometimes|nullable|string',
-            'additional_notes' => 'sometimes|nullable|string',
-            'amenities' => 'sometimes|nullable|array',
+        $this->listingQuery->transformListingForResponse($listing, $request->user());
+
+        return response()->json([
+            'message' => 'Listing loaded for edit.',
+            'listing' => $listing,
+            'metrics' => $this->listingMetricsPayload($listing),
         ]);
+    }
 
-        $listing->fill($data);
-        $listing->save();
+    /**
+     * Update listing (owner only) — same body/field names as add-post; only DB columns are written.
+     */
+    public function update(Request $request, Listing $listing): JsonResponse
+    {
+        try {
+            $this->authorizeListing($request, $listing);
 
-        $detailData = collect($data)->only([
-            'payment_plan',
-            'ownership',
-            'furnished',
-            'commission',
-            'roi',
-            'notes',
-            'additional_notes',
-            'amenities',
-        ])->toArray();
+            $listingId = $listing->id;
+            $payload = $this->resolveUpdatePayload($request);
+            $this->stripExpiryFieldsFromPayload($payload);
 
-        if (!empty($detailData)) {
-            $listing->detail()
-                ->updateOrCreate(
-                    ['listing_id' => $listing->id],
-                    $detailData
-                );
+            $formData = $this->extractFormDataFromPostPayload($payload, $request);
+            $this->stripExpiryFieldsFromPayload($formData);
+            $this->removeFormDataKeysFromPayload($payload);
+
+            $data = Validator::make($payload, $this->listingUpdateValidationRules())->validate();
+
+            if (!empty($formData)) {
+                $data = $this->applyFormDataToListingPayload($data, $formData);
+                $this->stripExpiryFieldsFromPayload($data);
+            }
+
+            $this->stripBlankOptionalNotes($data, $formData);
+
+            $this->applyUpdateToListing($listing, $data, $formData);
+            $this->replaceListingMediaOnUpdate($listing, $request);
+
+            $listing = $this->listingQuery->baseListingQuery($request, false)
+                ->where('created_by', $request->user()->id)
+                ->whereKey($listingId)
+                ->firstOrFail();
+
+            $this->listingQuery->transformListingForResponse($listing, $request->user());
+
+            return response()->json([
+                'message' => 'Listing updated successfully.',
+                'listing_id' => $listing->id,
+                'listing' => $listing,
+            ]);
+        } catch (ValidationException $e) {
+            return response()->json([
+                'message' => 'Validation failed.',
+                'error' => $e->getMessage(),
+                'errors' => $e->errors(),
+            ], 422);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'Failed to update listing.',
+                'error' => $e->getMessage(),
+            ], 500);
         }
-
-        return response()->json(
-            $listing->load(['creator.brokerProfile', 'detail'])
-        );
     }
 
     /**
@@ -253,27 +329,39 @@ class ListingController extends Controller
     }
 
     /**
-     * Mark as sold.
+     * Mark listing as sold (separate marked_as field; does not change status).
      */
-    public function markSold(Request $request, Listing $listing)
+    public function markSold(Request $request, Listing $listing): JsonResponse
     {
         $this->authorizeListing($request, $listing);
-        $listing->status = 'sold';
+        $listing->marked_as = 'sold';
         $listing->save();
 
-        return response()->json($listing);
+        return response()->json([
+            'message' => 'Listing marked as sold.',
+            'listing_id' => $listing->id,
+            'marked_as' => $listing->marked_as,
+            'status' => $listing->status,
+            'my_listings_totals' => $this->metricsService->dashboardForUser($request->user()->id),
+        ]);
     }
 
     /**
-     * Mark as rented.
+     * Mark listing as rented (separate marked_as field; does not change status).
      */
-    public function markRented(Request $request, Listing $listing)
+    public function markRented(Request $request, Listing $listing): JsonResponse
     {
         $this->authorizeListing($request, $listing);
-        $listing->status = 'rented';
+        $listing->marked_as = 'rented';
         $listing->save();
 
-        return response()->json($listing);
+        return response()->json([
+            'message' => 'Listing marked as rented.',
+            'listing_id' => $listing->id,
+            'marked_as' => $listing->marked_as,
+            'status' => $listing->status,
+            'my_listings_totals' => $this->metricsService->dashboardForUser($request->user()->id),
+        ]);
     }
 
     /**
@@ -293,6 +381,150 @@ class ListingController extends Controller
         return $paginator;
     }
 
+    /**
+     * Active listings for authenticated user (status active + not expired).
+     */
+    public function myActiveListings(Request $request): JsonResponse
+    {
+        return $this->paginatedMyListingsByScope($request, 'active');
+    }
+
+    /**
+     * Expired, sold, and rented listings for authenticated user.
+     */
+    public function myInactiveListings(Request $request): JsonResponse
+    {
+        return $this->paginatedMyListingsByScope($request, 'inactive');
+    }
+
+    /**
+     * Extend listing expiry by up to 1 month from now/current expiry.
+     */
+    public function extendExpiry(Request $request, Listing $listing): JsonResponse
+    {
+        $this->authorizeListing($request, $listing);
+
+        $base = $listing->expires_at instanceof Carbon && $listing->expires_at->isFuture()
+            ? $listing->expires_at->copy()
+            : Carbon::now();
+
+        $listing->expires_at = $base->addMonth();
+        if ($listing->status === 'inactive') {
+            $listing->status = 'active';
+        }
+
+        $clearedMarkedAs = false;
+        if (in_array($listing->marked_as, ['sold', 'rented'], true)) {
+            $listing->marked_as = null;
+            $clearedMarkedAs = true;
+        }
+
+        $listing->save();
+
+        return response()->json([
+            'message' => 'Listing expiry extended by 1 month.',
+            'listing_id' => $listing->id,
+            'expires_at' => $listing->expires_at?->toIso8601String(),
+            'post_expiry' => $listing->post_expiry,
+            'marked_as' => $listing->marked_as,
+            'marked_as_cleared' => $clearedMarkedAs,
+        ]);
+    }
+
+    private function paginatedMyListingsByScope(Request $request, string $scope): JsonResponse
+    {
+        $user = $request->user();
+        $query = $this->listingQuery->baseListingQuery($request, false)
+            ->where('created_by', $user->id);
+
+        if ($scope === 'active') {
+            $query->where('status', 'active')
+                ->whereNull('marked_as')
+                ->where(function ($q) {
+                    $q->whereNull('expires_at')
+                        ->orWhere('expires_at', '>', Carbon::now());
+                });
+        } else {
+            // Inactive = marked sold/rented OR expired (by date or status).
+            $query->where(function ($q) {
+                $q->whereIn('marked_as', ['sold', 'rented'])
+                    ->orWhere('status', 'expired')
+                    ->orWhere(function ($expiredQuery) {
+                        $expiredQuery->whereNotNull('expires_at')
+                            ->where('expires_at', '<=', Carbon::now());
+                    });
+            });
+        }
+
+        $query->orderByDesc('created_at');
+
+        $requestedPage = max(1, (int) $request->query('page', 1));
+        $paginator = $query->paginate(20, ['*'], 'page', $requestedPage);
+        if (count($paginator->items()) === 0 && $requestedPage > 1 && $paginator->lastPage() > 0) {
+            $paginator = $query->paginate(20, ['*'], 'page', $paginator->lastPage());
+        }
+
+        $this->listingQuery->transformPaginatorCollection($paginator, $user);
+
+        $payload = [
+            'scope' => $scope,
+            'listings' => $paginator->items(),
+            'pagination' => [
+                'current_page' => $paginator->currentPage(),
+                'last_page' => $paginator->lastPage(),
+                'per_page' => $paginator->perPage(),
+                'total' => $paginator->total(),
+                'from' => $paginator->firstItem(),
+                'to' => $paginator->lastItem(),
+                'has_more_pages' => $paginator->hasMorePages(),
+            ],
+        ];
+
+        if ($scope === 'inactive') {
+            $payload['summary'] = $this->inactiveListingsSummary($user->id);
+        }
+
+        return response()->json($payload);
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function inactiveListingsSummary(int $userId): array
+    {
+        $base = Listing::query()->where('created_by', $userId);
+
+        $inactiveFilter = function ($q) {
+            $q->whereIn('marked_as', ['sold', 'rented'])
+                ->orWhere('status', 'expired')
+                ->orWhere(function ($expiredQuery) {
+                    $expiredQuery->whereNotNull('expires_at')
+                        ->where('expires_at', '<=', Carbon::now());
+                });
+        };
+
+        return [
+            'marked_sold' => (clone $base)->where('marked_as', 'sold')->count(),
+            'marked_rented' => (clone $base)->where('marked_as', 'rented')->count(),
+            'expired' => (clone $base)->where(function ($q) {
+                $q->where('status', 'expired')
+                    ->orWhere(function ($expiredQuery) {
+                        $expiredQuery->whereNotNull('expires_at')
+                            ->where('expires_at', '<=', Carbon::now());
+                    });
+            })->count(),
+            'total_inactive' => (clone $base)->where($inactiveFilter)->count(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function listingMetricsPayload(Listing $listing): array
+    {
+        return $this->metricsService->externalTotalsForListing($listing);
+    }
+
     protected function authorizeListing(Request $request, Listing $listing): void
     {
         if ($listing->created_by !== $request->user()->id) {
@@ -302,11 +534,18 @@ class ListingController extends Controller
 
     private function resolveListingType(?string $kind): ?string
     {
-        return match ($kind) {
-            'sale' => 'sale',
-            'rent' => 'rent',
-            'required', 'rent_request', 'buy_request' => 'requirement',
-            default => 'requirement',
+        if ($kind === null || trim($kind) === '') {
+            return null;
+        }
+
+        $normalized = strtolower(trim(str_replace('_', ' ', $kind)));
+
+        return match ($normalized) {
+            'sale', 'for sale' => 'sale',
+            'rent', 'for rent' => 'rent',
+            'required', 'rent request', 'buy request', 'requirement' => 'requirement',
+            default => str_contains($normalized, 'rent') ? 'rent'
+                : (str_contains($normalized, 'sale') ? 'sale' : 'requirement'),
         };
     }
 
@@ -354,6 +593,32 @@ class ListingController extends Controller
         }
     }
 
+    /**
+     * Treat omitted or whitespace-only notes as not provided (optional field).
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $formData
+     */
+    private function stripBlankOptionalNotes(array &$data, array &$formData = []): void
+    {
+        foreach (['notes', 'description'] as $key) {
+            if (array_key_exists($key, $data) && $this->isBlankValue($data[$key])) {
+                unset($data[$key]);
+            }
+
+            if (array_key_exists($key, $formData) && $this->isBlankValue($formData[$key])) {
+                unset($formData[$key]);
+            }
+        }
+    }
+
+    private function isBlankValue($value): bool
+    {
+        return $value === null
+            || $value === ''
+            || (is_string($value) && trim($value) === '');
+    }
+
     private function parseFormDataField($value): array
     {
         if (is_array($value)) {
@@ -372,58 +637,242 @@ class ListingController extends Controller
         return ['raw' => $value];
     }
 
+    /**
+     * Map form-data JSON keys onto listings / listing_details columns when a matching DB column exists.
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $formData
+     * @return array<string, mixed>
+     */
     private function applyFormDataToListingPayload(array $data, array $formData): array
     {
-        $assignableFields = [
-            'listing_type',
-            'kind',
-            'property_type',
-            'title',
-            'price',
-            'currency',
-            'size',
-            'beds',
-            'baths',
-            'area',
-            'city',
-            'project',
-            'developer',
-            'off_plan',
-            'expires_at',
-            'description',
-            'payment_plan',
-            'ownership',
-            'furnished',
-            'commission',
-            'commission_type',
-            'roi',
-            'notes',
-            'additional_notes',
-            'amenities',
-            'post_expiry',
-        ];
+        $listingCols = $this->listingColumnsWritableFromFormData();
+        $detailCols = $this->listingDetailColumnsWritableFromFormData();
+        $aliases = $this->formDataFieldAliases();
 
-        foreach ($assignableFields as $field) {
-            if (array_key_exists($field, $formData)) {
-                $data[$field] = $this->normalizeIncomingFieldValue($field, $formData[$field]);
+        foreach ($formData as $rawKey => $value) {
+            if ($this->shouldSkipFormDataKey((string) $rawKey)) {
+                continue;
+            }
+
+            $key = $aliases[$this->normalizeFormDataKey((string) $rawKey)]
+                ?? $this->normalizeFormDataKey((string) $rawKey);
+
+            if ($key === 'off_plan' || $key === 'is_off_plan') {
+                $data['off_plan'] = $this->normalizeIncomingFieldValue('off_plan', $value);
+                continue;
+            }
+
+            if ($key === 'post_expiry') {
+                $data['expires_at'] = $this->normalizeIncomingFieldValue('expires_at', $value);
+                continue;
+            }
+
+            if ($key === 'commission_type') {
+                $data['commission_type'] = $this->normalizeIncomingFieldValue('commission_type', $value);
+                continue;
+            }
+
+            if ($key === 'kind') {
+                $data['kind'] = $this->normalizeIncomingFieldValue('kind', $value);
+                continue;
+            }
+
+            // App form often sends listing intent as "Status" (for rent / for sale), not DB lifecycle status.
+            if ($key === 'status') {
+                if ($this->isValidListingLifecycleStatus($value)) {
+                    $data['status'] = strtolower(trim((string) $value));
+                } else {
+                    $data['kind'] = $this->normalizeIncomingFieldValue('kind', $value);
+                }
+                continue;
+            }
+
+            // price / price-sp resolved together after the loop (price-sp takes priority).
+            if ($key === 'price' || $key === 'price_sp') {
+                continue;
+            }
+
+            if (isset($listingCols[$key])) {
+                $data[$key] = $this->normalizeIncomingFieldValue($key, $value);
+                continue;
+            }
+
+            if (isset($detailCols[$key])) {
+                if (!$this->isBlankValue($value) || $key !== 'notes') {
+                    $data[$key] = $this->normalizeIncomingFieldValue($key, $value);
+                }
             }
         }
 
-        // `post_expiry` is the app field; persist in DB as `expires_at`.
-        if (array_key_exists('post_expiry', $formData) && !array_key_exists('expires_at', $data)) {
-            $data['expires_at'] = $formData['post_expiry'];
+        $tags = $data['tags'] ?? null;
+        if ($tags === null) {
+            foreach ($formData as $rawKey => $value) {
+                $normalized = $this->normalizeFormDataKey((string) $rawKey);
+                if ($normalized === 'tags' || $normalized === 'tag') {
+                    $tags = $value;
+                    break;
+                }
+            }
         }
 
-        $tags = $formData['tags'] ?? ($formData['tag'] ?? null);
-        if (is_string($tags)) {
-            $tags = array_values(array_filter(array_map('trim', explode(',', $tags))));
+        if ($tags !== null) {
+            if (is_string($tags)) {
+                $tags = array_values(array_filter(array_map('trim', explode(',', $tags))));
+            }
+
+            if (is_array($tags)) {
+                $data['tags'] = $tags;
+            }
         }
 
-        if (is_array($tags)) {
-            $data['tags'] = $tags;
+        if (isset($formData['rooms']) && is_array($formData['rooms'])) {
+            if (!array_key_exists('beds', $data) && isset($formData['rooms']['bedrooms'])) {
+                $data['beds'] = $formData['rooms']['bedrooms'];
+            }
+            if (!array_key_exists('baths', $data) && isset($formData['rooms']['bathrooms'])) {
+                $data['baths'] = $formData['rooms']['bathrooms'];
+            }
+        }
+
+        $resolvedPrice = $this->resolveListingPriceFromFormData($formData);
+        if ($resolvedPrice !== null) {
+            $data['price'] = $resolvedPrice;
         }
 
         return $data;
+    }
+
+    /**
+     * Actual listing price: price-sp (or price_sp) when present, otherwise price from form-data.
+     *
+     * @param  array<string, mixed>  $formData
+     */
+    private function resolveListingPriceFromFormData(array $formData): ?float
+    {
+        $priceSp = $this->findFormDataValueByNormalizedKeys($formData, ['price_sp']);
+        if ($priceSp !== null && !$this->isBlankValue($priceSp)) {
+            return $this->castFormDataPrice($priceSp);
+        }
+
+        $price = $this->findFormDataValueByNormalizedKeys($formData, ['price']);
+        if ($price === null || $this->isBlankValue($price)) {
+            return null;
+        }
+
+        return $this->castFormDataPrice($price);
+    }
+
+    /**
+     * @param  array<string, mixed>  $formData
+     * @param  list<string>  $normalizedKeys
+     */
+    private function findFormDataValueByNormalizedKeys(array $formData, array $normalizedKeys): mixed
+    {
+        foreach ($formData as $rawKey => $value) {
+            if ($this->shouldSkipFormDataKey((string) $rawKey)) {
+                continue;
+            }
+
+            $key = $this->normalizeFormDataKey((string) $rawKey);
+            if (in_array($key, $normalizedKeys, true)) {
+                return $value;
+            }
+        }
+
+        return null;
+    }
+
+    private function castFormDataPrice(mixed $value): ?float
+    {
+        $normalized = $this->normalizeIncomingFieldValue('price', $value);
+        if ($normalized === null || $normalized === '') {
+            return null;
+        }
+
+        return (float) $normalized;
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function listingColumnsWritableFromFormData(): array
+    {
+        static $columns = null;
+
+        if ($columns === null) {
+            // `status` is post lifecycle (active/expired), not app "Status" (for rent / for sale).
+            $exclude = ['created_by', 'views_count', 'clicks_count', 'leads_count', 'saves_count', 'status'];
+            $columns = array_flip(array_diff((new Listing())->getFillable(), $exclude));
+        }
+
+        return $columns;
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    private function listingDetailColumnsWritableFromFormData(): array
+    {
+        static $columns = null;
+
+        if ($columns === null) {
+            $columns = array_flip(array_diff(
+                (new ListingDetail())->getFillable(),
+                ['listing_id', 'form_data', 'extra']
+            ));
+        }
+
+        return $columns;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function formDataFieldAliases(): array
+    {
+        return [
+            'note' => 'notes',
+            'description' => 'notes',
+            'tag' => 'tags',
+            'title' => 'property_type',
+        ];
+    }
+
+    private function normalizeFormDataKey(string $key): string
+    {
+        $key = strtolower(trim($key));
+
+        return str_replace(['-', ' '], '_', $key);
+    }
+
+    private function isValidListingLifecycleStatus(mixed $value): bool
+    {
+        if (!is_string($value)) {
+            return false;
+        }
+
+        return in_array(strtolower(trim($value)), ['active', 'sold', 'rented', 'expired'], true);
+    }
+
+    private function shouldSkipFormDataKey(string $key): bool
+    {
+        $normalized = $this->normalizeFormDataKey($key);
+
+        return in_array($normalized, [
+            'images',
+            'videos',
+            'documents',
+            'attachments',
+            'media',
+            'photos',
+            'files',
+            'image',
+            'video',
+            'document',
+            'rooms',
+            'raw',
+        ], true);
     }
 
     private function normalizeIncomingFieldValue(string $field, $value)
@@ -434,6 +883,22 @@ class ListingController extends Controller
         }
 
         if (is_array($value)) {
+            if ($field === 'price') {
+                if (array_key_exists('sp', $value) && !$this->isBlankValue($value['sp'])) {
+                    return $value['sp'];
+                }
+
+                return $value['amount'] ?? null;
+            }
+
+            if ($field === 'beds') {
+                return $value['bedrooms'] ?? $value['beds'] ?? null;
+            }
+
+            if ($field === 'baths') {
+                return $value['bathrooms'] ?? $value['baths'] ?? null;
+            }
+
             // Multipart form-data often sends scalar values as single-item arrays.
             if (array_is_list($value) && count($value) === 1) {
                 return $this->normalizeIncomingFieldValue($field, $value[0]);
@@ -447,7 +912,42 @@ class ListingController extends Controller
             return null;
         }
 
+        if (in_array($field, ['roi', 'commission'], true)) {
+            return $this->normalizeDecimalField($value);
+        }
+
+        if ($field === 'price' && is_string($value)) {
+            $decimal = $this->normalizeDecimalField($value);
+
+            return $decimal ?? $value;
+        }
+
         return $value;
+    }
+
+    /**
+     * Strip %, commas, spaces — store decimals for DB (e.g. "8.0%" → 8.0).
+     */
+    private function normalizeDecimalField(mixed $value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_numeric($value)) {
+            return (float) $value;
+        }
+
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $cleaned = preg_replace('/[^0-9.\-]/', '', str_replace(',', '', trim($value)));
+        if ($cleaned === '' || $cleaned === '-' || $cleaned === '.') {
+            return null;
+        }
+
+        return (float) $cleaned;
     }
 
     private function listingStoreValidationRules(): array
@@ -484,8 +984,8 @@ class ListingController extends Controller
             'commission' => 'nullable|numeric',
             'commission_type' => 'nullable|in:covered,percentage,fixed,not_disclosed',
             'roi' => 'nullable|numeric',
-            'notes' => 'nullable|string',
-            'additional_notes' => 'nullable|string',
+            'notes' => 'sometimes|nullable|string',
+            'additional_notes' => 'sometimes|nullable|string',
             'amenities' => 'nullable|array',
             'amenities.*' => 'string|max:100',
 
@@ -546,8 +1046,17 @@ class ListingController extends Controller
             }
 
             $index = (int) $match[1];
-            $field = (string) $match[2];
-            $bracketStyle[$index][$field] = $value;
+            $field = $this->normalizePostsBracketFieldName((string) $match[2]);
+            if (!array_key_exists($field, $bracketStyle[$index] ?? [])) {
+                $bracketStyle[$index][$field] = $value;
+                continue;
+            }
+
+            $existing = $bracketStyle[$index][$field];
+            $bracketStyle[$index][$field] = array_merge(
+                (array) $existing,
+                (array) $value
+            );
         }
 
         if (!empty($bracketStyle)) {
@@ -556,6 +1065,19 @@ class ListingController extends Controller
         }
 
         return [$request->all()];
+    }
+
+    private function normalizePostsBracketFieldName(string $field): string
+    {
+        if (str_ends_with($field, '][]')) {
+            return substr($field, 0, -3);
+        }
+
+        if (str_ends_with($field, '[]')) {
+            return substr($field, 0, -2);
+        }
+
+        return $field;
     }
 
     private function normalizePostsInput(array $posts): array
@@ -643,82 +1165,14 @@ class ListingController extends Controller
         bool $storeTopLevelMedia,
         array $mediaFiles = []
     ): Listing {
-        $listingType = $data['listing_type'] ?? $this->resolveListingType($data['kind'] ?? null);
-        if (!$listingType) {
-            $listingType = 'requirement';
-        }
-
-        $data['is_off_plan'] = (bool) ((int) $data['off_plan']);
-        unset($data['off_plan']);
-
-        if (!empty($data['title']) && empty($data['property_type'])) {
-            $data['property_type'] = $data['title'];
-        }
-
-        if (empty($data['currency'])) {
-            $data['currency'] = 'AED';
-        }
-
-        if (empty($data['expires_at']) && !empty($data['post_expiry'])) {
-            $data['expires_at'] = $data['post_expiry'];
-        }
         if (empty($data['expires_at'])) {
             $data['expires_at'] = Carbon::now()->addMonth();
         }
 
-        $propertyType = $data['property_type'] ?? $data['title'] ?? 'Untitled Post';
-        $detailNotes = $data['notes'] ?? $data['description'] ?? null;
-        $normalizedTags = $this->normalizeTags($data['tags'] ?? []);
-
-        if (!empty($data['kind']) && in_array($data['kind'], ['rent_request', 'buy_request'], true)) {
-            $requestTag = strtoupper(str_replace('_', ' ', (string) $data['kind']));
-            if (!in_array($requestTag, $normalizedTags, true)) {
-                $normalizedTags[] = $requestTag;
-            }
-        }
-
         $listing = new Listing();
-        $listing->fill(array_merge($data, [
-            'listing_type' => $listingType,
-            'property_type' => $propertyType,
-            'tags' => $normalizedTags,
-        ]));
         $listing->created_by = $userId;
+        $this->applyValidatedPayloadToListing($listing, $data, $formData, false);
         $listing->save();
-
-        $detailData = collect($data)->only([
-            'payment_plan',
-            'ownership',
-            'furnished',
-            'commission',
-            'roi',
-            'amenities',
-            'additional_notes',
-        ])->toArray();
-        $detailData['notes'] = $detailNotes;
-        if (!empty($formData)) {
-            $detailData['form_data'] = $formData;
-        }
-
-        $extra = [];
-        if (!empty($data['commission_type'])) {
-            $extra['commission_type'] = $data['commission_type'];
-        }
-        if (!empty($data['kind'])) {
-            $extra['kind'] = (string) $data['kind'];
-        }
-        if (!empty($data['description']) && empty($detailData['notes'])) {
-            $detailData['notes'] = $data['description'];
-        }
-        if (!empty($extra)) {
-            $detailData['extra'] = $extra;
-        }
-
-        if (collect($detailData)->filter(fn ($value) => $value !== null)->isNotEmpty()) {
-            $detail = new ListingDetail($detailData);
-            $detail->listing_id = $listing->id;
-            $detail->save();
-        }
 
         if ($storeTopLevelMedia) {
             $this->storeUploadedMedia($request, $listing);
@@ -728,6 +1182,373 @@ class ListingController extends Controller
         }
 
         return $listing;
+    }
+
+    /**
+     * Normalize add-post style body (posts[0][field], object0, or flat JSON) for update.
+     *
+     * @return array<string, mixed>
+     */
+    private function resolveUpdatePayload(Request $request): array
+    {
+        $payloads = $this->resolveIncomingPostPayloads($request);
+        $payloadFiles = $this->resolveIncomingPostFiles($request);
+
+        $payload = $payloads[0] ?? $this->mergeRequestPayload($request);
+
+        if (!empty($payloadFiles[0])) {
+            $payload = array_merge($payload, $payloadFiles[0]);
+        }
+
+        foreach (['images', 'videos', 'documents'] as $field) {
+            if ($request->hasFile($field)) {
+                $payload[$field] = $this->normalizeFileGroup($request->file($field));
+            }
+        }
+
+        return $payload;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function extractFormDataFromPostPayload(array $payload, Request $request): array
+    {
+        if (array_key_exists('form-data', $payload)) {
+            return $this->parseFormDataField($payload['form-data']);
+        }
+
+        if (array_key_exists('form_data', $payload)) {
+            return $this->parseFormDataField($payload['form_data']);
+        }
+
+        if (array_key_exists('formData', $payload)) {
+            return $this->parseFormDataField($payload['formData']);
+        }
+
+        $topLevel = $this->parseFormDataField(
+            $request->input('form-data', $request->input('form_data', $request->input('formData')))
+        );
+
+        if (!empty($topLevel) && !array_is_list($topLevel)) {
+            return $topLevel;
+        }
+
+        return [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function removeFormDataKeysFromPayload(array &$payload): void
+    {
+        unset($payload['form-data'], $payload['form_data'], $payload['formData'], $payload['posts']);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function mergeRequestPayload(Request $request): array
+    {
+        $payload = $request->all();
+
+        if ($request->isJson()) {
+            $json = $request->json()->all();
+            if (is_array($json)) {
+                $payload = array_merge($payload, $json);
+            }
+        }
+
+        return $payload;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function stripExpiryFieldsFromPayload(array &$payload): void
+    {
+        unset($payload['post_expiry'], $payload['expires_at']);
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function extractFormDataFromPayload(array &$payload): array
+    {
+        foreach (['form-data', 'form_data', 'formData'] as $key) {
+            if (!array_key_exists($key, $payload)) {
+                continue;
+            }
+
+            $parsed = $this->parseFormDataField($payload[$key]);
+            unset($payload[$key]);
+
+            return $parsed;
+        }
+
+        return [];
+    }
+
+    /**
+     * Persist validated add-post fields onto a listing (create or partial update).
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $formData
+     */
+    /**
+     * Update only listings + listing_details DB columns (same mapping as add-post).
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $formData  Raw form-data JSON from request (replaces column when sent)
+     */
+    private function applyUpdateToListing(Listing $listing, array $data, array $formData): void
+    {
+        $sent = static fn (string $key): bool => array_key_exists($key, $data);
+
+        if ($sent('listing_type') || $sent('kind')) {
+            $listingType = $data['listing_type'] ?? $this->resolveListingType($data['kind'] ?? null);
+            if ($listingType) {
+                $listing->listing_type = $listingType;
+            }
+        }
+
+        if ($sent('off_plan')) {
+            $listing->is_off_plan = (bool) ((int) $data['off_plan']);
+        } elseif ($sent('is_off_plan')) {
+            $listing->is_off_plan = (bool) $data['is_off_plan'];
+        }
+
+        if ($sent('title') || $sent('property_type')) {
+            $propertyType = $data['property_type'] ?? $data['title'] ?? null;
+            if ($propertyType !== null && $propertyType !== '') {
+                $listing->property_type = $propertyType;
+            }
+        }
+
+        foreach (array_keys($this->listingColumnsWritableFromFormData()) as $field) {
+            if (in_array($field, ['is_off_plan', 'tags', 'expires_at', 'listing_type'], true)) {
+                continue;
+            }
+
+            if ($sent($field)) {
+                $listing->{$field} = $data[$field];
+            }
+        }
+
+        if ($sent('tags')) {
+            $listing->tags = $this->normalizeTags($data['tags'] ?? []);
+        }
+
+        if ($sent('status') && $this->isValidListingLifecycleStatus($data['status'])) {
+            $listing->status = $data['status'];
+        }
+
+        $listing->save();
+
+        $detail = $listing->detail()->firstOrNew(['listing_id' => $listing->id]);
+        $detailChanged = false;
+
+        foreach (array_keys($this->listingDetailColumnsWritableFromFormData()) as $field) {
+            if ($field === 'notes') {
+                continue;
+            }
+
+            if ($sent($field)) {
+                $detail->{$field} = $data[$field];
+                $detailChanged = true;
+            }
+        }
+
+        if ($sent('notes') || $sent('description')) {
+            $detail->notes = $data['notes'] ?? $data['description'];
+            $detailChanged = true;
+        }
+
+        $extra = is_array($detail->extra) ? $detail->extra : [];
+        $extraChanged = false;
+
+        if ($sent('commission_type')) {
+            $extra['commission_type'] = $data['commission_type'];
+            $extraChanged = true;
+        }
+
+        if ($sent('kind')) {
+            $extra['kind'] = (string) $data['kind'];
+            $extraChanged = true;
+        }
+
+        if ($extraChanged) {
+            $detail->extra = $extra;
+            $detailChanged = true;
+        }
+
+        if ($formData !== []) {
+            $existingFormData = is_array($detail->form_data) ? $detail->form_data : [];
+            $detail->form_data = $this->formDataNormalizer->normalize(array_merge(
+                $existingFormData,
+                $this->stripMediaKeysFromFormData($formData)
+            ));
+            $detailChanged = true;
+        }
+
+        if ($detailChanged) {
+            $detail->listing_id = $listing->id;
+            $detail->save();
+        }
+    }
+
+    private function applyValidatedPayloadToListing(
+        Listing $listing,
+        array $data,
+        array $formData,
+        bool $partial = false
+    ): void {
+        $shouldApply = static function (string $key) use ($data): bool {
+            return array_key_exists($key, $data);
+        };
+
+        if ($shouldApply('listing_type') || $shouldApply('kind')) {
+            $listingType = $data['listing_type'] ?? $this->resolveListingType($data['kind'] ?? $listing->listing_type);
+            if ($listingType) {
+                $listing->listing_type = $listingType;
+            }
+        }
+
+        if ($shouldApply('off_plan')) {
+            $listing->is_off_plan = (bool) ((int) $data['off_plan']);
+        } elseif ($shouldApply('is_off_plan')) {
+            $listing->is_off_plan = (bool) $data['is_off_plan'];
+        } elseif (!$partial) {
+            $listing->is_off_plan = false;
+        }
+
+        if ($shouldApply('title') || $shouldApply('property_type')) {
+            $propertyType = $data['property_type'] ?? $data['title'] ?? null;
+            if ($propertyType !== null && $propertyType !== '') {
+                $listing->property_type = $propertyType;
+            }
+        }
+
+        if ($shouldApply('currency')) {
+            $listing->currency = $data['currency'] ?? $listing->currency ?? 'AED';
+        }
+
+        // Expiry is not updated via listing update API (use extend-expiry endpoint).
+        if (!$partial && ($shouldApply('post_expiry') || $shouldApply('expires_at'))) {
+            $expiresAt = $data['expires_at'] ?? $data['post_expiry'] ?? null;
+            if ($expiresAt !== null) {
+                $listing->expires_at = $expiresAt;
+            }
+        }
+
+        $listingFields = [
+            'price',
+            'size',
+            'beds',
+            'baths',
+            'area',
+            'city',
+            'project',
+            'developer',
+            'marked_as',
+        ];
+
+        foreach ($listingFields as $field) {
+            if ($shouldApply($field) && array_key_exists($field, $data)) {
+                $listing->{$field} = $data[$field];
+            }
+        }
+
+        if ($shouldApply('status') && $this->isValidListingLifecycleStatus($data['status'])) {
+            $listing->status = $data['status'];
+        } elseif (!$partial && empty($listing->status)) {
+            $listing->status = 'active';
+        }
+
+        if ($shouldApply('tags')) {
+            $listing->tags = $this->normalizeTags($data['tags'] ?? []);
+        }
+
+        if ($shouldApply('kind') && !empty($data['kind']) && in_array($data['kind'], ['rent_request', 'buy_request'], true)) {
+            $requestTag = strtoupper(str_replace('_', ' ', (string) $data['kind']));
+            $tags = is_array($listing->tags) ? $listing->tags : [];
+            if (!in_array($requestTag, $tags, true)) {
+                $tags[] = $requestTag;
+                $listing->tags = $tags;
+            }
+        }
+
+        if (!$partial && empty($listing->property_type)) {
+            $listing->property_type = $data['property_type'] ?? $data['title'] ?? 'Untitled Post';
+        }
+
+        if (!$partial && empty($listing->currency)) {
+            $listing->currency = 'AED';
+        }
+
+        $listing->save();
+
+        $detailFields = ['payment_plan', 'ownership', 'furnished', 'commission', 'roi', 'amenities', 'additional_notes'];
+        $detailData = [];
+        foreach ($detailFields as $field) {
+            if ($shouldApply($field)) {
+                $detailData[$field] = $data[$field];
+            }
+        }
+
+        if ($shouldApply('notes')) {
+            $detailData['notes'] = $data['notes'];
+        } elseif ($shouldApply('description')) {
+            $detailData['notes'] = $data['description'];
+        }
+
+        $detail = $listing->detail()->firstOrNew(['listing_id' => $listing->id]);
+        $existingExtra = is_array($detail->extra) ? $detail->extra : [];
+
+        if ($shouldApply('commission_type') && !empty($data['commission_type'])) {
+            $existingExtra['commission_type'] = $data['commission_type'];
+        }
+        if ($shouldApply('kind') && !empty($data['kind'])) {
+            $existingExtra['kind'] = (string) $data['kind'];
+        }
+        if (!empty($existingExtra)) {
+            $detailData['extra'] = $existingExtra;
+        }
+
+        if (!empty($formData)) {
+            $detailData['form_data'] = $this->formDataNormalizer->normalize(array_merge(
+                $detail->form_data ?? [],
+                $this->stripMediaKeysFromFormData($formData)
+            ));
+        } elseif ($partial && $shouldApply('form_data') && is_array($data['form_data'] ?? null)) {
+            $detailData['form_data'] = $this->formDataNormalizer->normalize(array_merge(
+                $detail->form_data ?? [],
+                $data['form_data']
+            ));
+        }
+
+        if (collect($detailData)->filter(fn ($value) => $value !== null && $value !== [])->isNotEmpty()) {
+            $detail->fill($detailData);
+            $detail->listing_id = $listing->id;
+            $detail->save();
+        }
+    }
+
+    private function listingUpdateValidationRules(): array
+    {
+        $rules = [];
+        foreach ($this->listingStoreValidationRules() as $field => $rule) {
+            if (str_contains($field, '.*')) {
+                $rules[$field] = $rule;
+                continue;
+            }
+
+            $rules[$field] = str_starts_with($rule, 'sometimes|') ? $rule : 'sometimes|' . $rule;
+        }
+
+        return $rules;
     }
 
     private function resolveIncomingPostFiles(Request $request): array
@@ -765,7 +1586,7 @@ class ListingController extends Controller
         return [$group];
     }
 
-    private function storeUploadedMediaFromFiles(array $filesByGroup, Listing $listing): void
+    private function storeUploadedMediaFromFiles(array $filesByGroup, Listing $listing, int $orderStart = 0): void
     {
         $groups = [
             'images' => 'image',
@@ -773,7 +1594,7 @@ class ListingController extends Controller
             'documents' => 'doc',
         ];
 
-        $order = 0;
+        $order = $orderStart;
         foreach ($groups as $field => $type) {
             if (empty($filesByGroup[$field]) || !is_array($filesByGroup[$field])) {
                 continue;
@@ -793,6 +1614,125 @@ class ListingController extends Controller
                 ]);
             }
         }
+    }
+
+    /**
+     * On update: replace listing_media rows per type (no append duplicates).
+     */
+    private function replaceListingMediaOnUpdate(Listing $listing, Request $request): void
+    {
+        $mediaFiles = $this->collectUpdateMediaFiles($request);
+
+        if (!array_filter($mediaFiles)) {
+            return;
+        }
+
+        $groups = [
+            'images' => 'image',
+            'videos' => 'video',
+            'documents' => 'doc',
+        ];
+
+        foreach ($groups as $field => $type) {
+            if (empty($mediaFiles[$field])) {
+                continue;
+            }
+
+            $this->deleteListingMediaByType($listing, $type);
+            $this->storeUploadedMediaFromFiles([$field => $mediaFiles[$field]], $listing);
+        }
+    }
+
+    /**
+     * @return array{images: array, videos: array, documents: array}
+     */
+    private function collectUpdateMediaFiles(Request $request): array
+    {
+        $files = [
+            'images' => [],
+            'videos' => [],
+            'documents' => [],
+        ];
+
+        $payloadFiles = $this->resolveIncomingPostFiles($request);
+        if (!empty($payloadFiles[0])) {
+            foreach (array_keys($files) as $field) {
+                $files[$field] = array_merge(
+                    $files[$field],
+                    $this->normalizeFileGroup($payloadFiles[0][$field] ?? null)
+                );
+            }
+        }
+
+        foreach (array_keys($files) as $field) {
+            if ($request->hasFile($field)) {
+                $files[$field] = array_merge(
+                    $files[$field],
+                    $this->normalizeFileGroup($request->file($field))
+                );
+            }
+
+            $nested = $request->file('posts.0.' . $field);
+            if ($nested !== null) {
+                $files[$field] = array_merge($files[$field], $this->normalizeFileGroup($nested));
+            }
+        }
+
+        return $files;
+    }
+
+    private function deleteListingMediaByType(Listing $listing, string $type): void
+    {
+        $listing->media()->where('type', $type)->get()->each(function (ListingMedia $media) {
+            $this->deleteStoredMediaFile($media->getRawOriginal('url') ?? $media->url);
+            $media->delete();
+        });
+    }
+
+    private function deleteStoredMediaFile(?string $url): void
+    {
+        if (!is_string($url) || $url === '') {
+            return;
+        }
+
+        $path = parse_url($url, PHP_URL_PATH);
+        if (!is_string($path) || $path === '') {
+            return;
+        }
+
+        $relative = Str::startsWith($path, '/storage/')
+            ? Str::after($path, '/storage/')
+            : ltrim($path, '/');
+
+        if ($relative !== '') {
+            Storage::disk('public')->delete($relative);
+        }
+    }
+
+    /**
+     * Media lives in listing_media table only — keep out of form_data JSON.
+     *
+     * @param  array<string, mixed>  $formData
+     * @return array<string, mixed>
+     */
+    private function stripMediaKeysFromFormData(array $formData): array
+    {
+        foreach ([
+            'images',
+            'videos',
+            'documents',
+            'attachments',
+            'media',
+            'photos',
+            'files',
+            'image',
+            'video',
+            'document',
+        ] as $key) {
+            unset($formData[$key]);
+        }
+
+        return $formData;
     }
 }
 

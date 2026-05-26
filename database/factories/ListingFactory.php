@@ -26,9 +26,12 @@ class ListingFactory extends Factory
             'project' => null,
             'developer' => null,
             'status' => 'active',
+            'marked_as' => null,
             'is_off_plan' => false,
             'tags' => ['NEW'],
             'views_count' => 0,
+            'clicks_count' => 0,
+            'leads_count' => 0,
             'saves_count' => 0,
             'expires_at' => now()->addMonth(),
         ];

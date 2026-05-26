@@ -142,26 +142,25 @@ C) LISTING APIs (Protected)
 C1. GET /listings
 URL: {{base_url}}/listings
 Query params (supported):
-- status (exact by detail.form_data.status aliases like for sale, for rent, rent request)
-- listing_type (sale/rent/requirement)
-- off_plan (true/false or 1/0)
-- is_off_plan (true/false)
-- city (exact)
-- area (exact)
-- property_type (exact)
-- beds, min_beds, baths
-- min_price, max_price
-- tags (comma separated; ALL tags must exist now)
-- keyword (exact match search across configured fields)
+- Flat: ?city=Dubai&status=for sale&listing_type=sale&off_plan=true&property_type=Apartment&beds=3&min_price=1200000&max_price=8000000&tags=urgent,below market&keyword=dubai&page=1
+- Nested (mobile): ?filters[city]=Dubai&filters[status]=for sale  OR  ?filters={"city":"Dubai","status":"for sale"}
+- status / listing_type (sale, rent, requirement, for sale, for rent, buy request, etc.)
+- off_plan / is_off_plan (true/false or 1/0) — omit when not filtering
+- city, area, property_type (partial match on column + form_data)
+- beds (exact, or min when from filter UI), min_beds (>=), baths
+- min_price, max_price (uses listings.price or form_data price-sp)
+- tags (comma separated; ANY tag match)
+- keyword, q, search
 - page
 Body: none
-
-Example:
-{{base_url}}/listings?status=for sale&off_plan=true&city=Dubai&property_type=apartment&beds=3&min_price=1200000&max_price=8000000&tags=urgent,below market&keyword=dubai&page=1
+Empty results: { "message": "No listings found for the selected filters.", "listings": [], "pagination": {...} }
+Response always includes "applied_filters": {} showing what the server received (debug Apply button).
+GET or POST /listings both accepted; filters may be query, JSON body, or filters={...}.
 
 C2. GET /listings/search
 URL: {{base_url}}/listings/search
 Same filters/pagination as /listings
+When no results: includes message "No listings found matching your search." (or "No listings found." if keyword empty)
 
 C3. GET /listings/my
 URL: {{base_url}}/listings/my
@@ -189,14 +188,15 @@ Body (JSON sample):
   "baths": 4,
   "is_off_plan": false,
   "tags": ["URGENT", "EXCLUSIVE"],
-  "notes": "Sample notes",
+  "notes": "Sample notes (optional)",
   "additional_notes": "Optional extra notes"
 }
 Note: endpoint also supports add-post style payloads and form-data media uploads.
+Note: notes is optional on create; omit posts[n][notes] or leave blank.
 
 C7. POST /listings/add-post (alias to create)
 URL: {{base_url}}/listings/add-post
-Body: same as POST /listings
+Body: same as POST /listings (notes optional)
 
 C8. GET /listings/{listing}
 URL: {{base_url}}/listings/113
@@ -208,9 +208,13 @@ Body (JSON sample):
 {
   "price": 1800000,
   "beds": 3,
-  "notes": "Updated notes",
+  "notes": "Updated notes (optional)",
   "additional_notes": "Updated additional notes"
 }
+
+C9b. POST /listings/{listing}/update (alias to update)
+URL: {{base_url}}/listings/154/update
+Body: same as PUT /listings/{listing}; notes optional.
 
 C10. DELETE /listings/{listing}
 URL: {{base_url}}/listings/113
@@ -327,27 +331,41 @@ Body: none
 G) LIKES APIs (Protected)
 ============================================================
 
-G1. POST /listings/{listing}/likes
+G1. GET /listings/{listing}/likes
+URL: {{base_url}}/listings/113/likes
+Body: none
+Auth: Bearer token (sanctum)
+Response example:
+{
+  "listing_id": 113,
+  "likes_count": 24,
+  "is_liked": 1
+}
+Notes:
+- likes_count = total likes on that listing
+- is_liked = 1 if logged-in user liked this listing, else 0
+
+G2. POST /listings/{listing}/likes
 URL: {{base_url}}/listings/113/likes
 Body: none
 
-G2. DELETE /listings/{listing}/likes
+G3. DELETE /listings/{listing}/likes
 URL: {{base_url}}/listings/113/likes
 Body: none
 
-G3. POST /updates/{post}/likes
+G4. POST /updates/{post}/likes
 URL: {{base_url}}/updates/55/likes
 Body: none
 
-G4. DELETE /updates/{post}/likes
+G5. DELETE /updates/{post}/likes
 URL: {{base_url}}/updates/55/likes
 Body: none
 
-G5. POST /comments/{comment}/likes
+G6. POST /comments/{comment}/likes
 URL: {{base_url}}/comments/501/likes
 Body: none
 
-G6. DELETE /comments/{comment}/likes
+G7. DELETE /comments/{comment}/likes
 URL: {{base_url}}/comments/501/likes
 Body: none
 

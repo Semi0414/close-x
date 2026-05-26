@@ -24,9 +24,12 @@ class Listing extends Model
         'project',
         'developer',
         'status',
+        'marked_as',
         'is_off_plan',
         'tags',
         'views_count',
+        'clicks_count',
+        'leads_count',
         'saves_count',
         'expires_at',
     ];
@@ -35,6 +38,8 @@ class Listing extends Model
         'tags' => 'array',
         'is_off_plan' => 'boolean',
         'views_count' => 'integer',
+        'clicks_count' => 'integer',
+        'leads_count' => 'integer',
         'saves_count' => 'integer',
         'expires_at' => 'datetime',
     ];
@@ -98,6 +103,11 @@ class Listing extends Model
     public function likes()
     {
         return $this->morphMany(Like::class, 'likeable');
+    }
+
+    public function metricEvents()
+    {
+        return $this->hasMany(ListingMetricEvent::class);
     }
 }
 

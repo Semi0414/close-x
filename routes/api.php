@@ -7,6 +7,7 @@ use App\Http\Controllers\Api\FavoriteController;
 use App\Http\Controllers\Api\LikeController;
 use App\Http\Controllers\Api\ListingCommentController;
 use App\Http\Controllers\Api\ListingController;
+use App\Http\Controllers\Api\ListingMetricsController;
 use App\Http\Controllers\Api\ListingFilterController;
 use App\Http\Controllers\Api\ListingReviewController;
 use App\Http\Controllers\Api\PostCommentController;
@@ -71,11 +72,17 @@ Route::middleware(['auth:sanctum', 'approved'])
         Route::delete('/me', [ProfileController::class, 'deleteAccount']);
 
         // Listings
-        Route::get('/listings', [ListingController::class, 'index']);
+        Route::match(['get', 'post'], '/listings', [ListingController::class, 'index']);
         Route::get('/listings/my', [ListingController::class, 'myListings']);
+        Route::get('/listings/my/active', [ListingController::class, 'myActiveListings']);
+        Route::get('/listings/my/inactive', [ListingController::class, 'myInactiveListings']);
+        Route::get('/listings/my/metrics', [ListingMetricsController::class, 'getMyAll']);
+        Route::get('/listings/my/views-count', [ListingMetricsController::class, 'getMyViews']);
+        Route::get('/listings/my/clicks-count', [ListingMetricsController::class, 'getMyClicks']);
+        Route::get('/listings/my/leads-count', [ListingMetricsController::class, 'getMyLeads']);
         Route::get('/listings/add-post', [ListingController::class, 'addPostForm']);
         Route::get('/listings/filters', [ListingFilterController::class, 'index']);
-        Route::get('/listings/search', [ListingController::class, 'search']);
+        Route::match(['get', 'post'], '/listings/search', [ListingController::class, 'search']);
         Route::post('/listings', [ListingController::class, 'store']);
         Route::post('/listings/add-post', [ListingController::class, 'store']);
 
@@ -91,13 +98,27 @@ Route::middleware(['auth:sanctum', 'approved'])
         Route::get('/listings/{listing}/comments', [ListingCommentController::class, 'index']);
         Route::post('/listings/{listing}/comments', [ListingCommentController::class, 'store']);
 
+        Route::get('/listings/{listing}/likes', [LikeController::class, 'getListingLikes']);
         Route::post('/listings/{listing}/likes', [LikeController::class, 'storeListing']);
         Route::delete('/listings/{listing}/likes', [LikeController::class, 'destroyListing']);
 
+        Route::get('/listings/{listing}/edit', [ListingController::class, 'edit']);
+        Route::post('/listings/{listing}/update', [ListingController::class, 'update']);
+        Route::post('/listings/add-post/{listing}', [ListingController::class, 'update']);
         Route::put('/listings/{listing}', [ListingController::class, 'update']);
+        Route::patch('/listings/{listing}', [ListingController::class, 'update']);
         Route::delete('/listings/{listing}', [ListingController::class, 'destroy']);
+        Route::post('/listings/{listing}/extend-expiry', [ListingController::class, 'extendExpiry']);
         Route::post('/listings/{listing}/mark-sold', [ListingController::class, 'markSold']);
         Route::post('/listings/{listing}/mark-rented', [ListingController::class, 'markRented']);
+
+        Route::get('/listings/{listing}/views-count', [ListingMetricsController::class, 'getViews']);
+        Route::post('/listings/{listing}/views-count', [ListingMetricsController::class, 'postViews']);
+        Route::get('/listings/{listing}/clicks-count', [ListingMetricsController::class, 'getClicks']);
+        Route::post('/listings/{listing}/clicks-count', [ListingMetricsController::class, 'postClicks']);
+        Route::get('/listings/{listing}/leads-count', [ListingMetricsController::class, 'getLeads']);
+        Route::post('/listings/{listing}/leads-count', [ListingMetricsController::class, 'postLeads']);
+
         Route::get('/listings/{listing}', [ListingController::class, 'show']);
 
         // Favorites

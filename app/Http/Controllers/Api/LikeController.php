@@ -11,6 +11,31 @@ use Illuminate\Http\Request;
 
 class LikeController extends Controller
 {
+    public function getListingLikes(Request $request, Listing $listing)
+    {
+        $user = $request->user();
+
+        $likesCount = Like::query()
+            ->where('likeable_type', 'listing')
+            ->where('likeable_id', $listing->id)
+            ->count();
+
+        $isLiked = 0;
+        if ($user) {
+            $isLiked = Like::query()
+                ->where('user_id', $user->id)
+                ->where('likeable_type', 'listing')
+                ->where('likeable_id', $listing->id)
+                ->exists() ? 1 : 0;
+        }
+
+        return response()->json([
+            'listing_id' => $listing->id,
+            'likes_count' => $likesCount,
+            'is_liked' => $isLiked,
+        ]);
+    }
+
     public function storeListing(Request $request, Listing $listing)
     {
         return $this->storeLike($request, 'listing', $listing->id);
