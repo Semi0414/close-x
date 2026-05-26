@@ -161,6 +161,11 @@ C2. GET /listings/search
 URL: {{base_url}}/listings/search
 Same filters/pagination as /listings
 When no results: includes message "No listings found matching your search." (or "No listings found." if keyword empty)
+Keyword also accepts compact prices (parsed from the search string):
+  12k, 22M, 1.2M, 12k AED, 22M USD, $22M, AED 12M (currency after amount)
+  Matches listings.price (and price in form_data) by rounded thousands/millions; optional currency filter (AED, USD, EUR, GBP, $).
+  Examples: ?keyword=12M+AED  ?keyword=downtown+Dubai  ?keyword=12k+downtown
+  Mixed keyword: location text OR price match (broad search).
 
 C3. GET /listings/my
 URL: {{base_url}}/listings/my

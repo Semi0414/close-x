@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Listing;
+use App\Support\CompactPriceSearch;
 use App\Support\ListingFormDataNormalizer;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
@@ -378,56 +379,121 @@ class ListingQueryService
 
     /**
      * Full-text style match across listings, listing_details.form_data, broker, and reviews.
+     * Also supports compact prices in the keyword (12k, 22M, 12k AED, $22M USD).
      */
     private function applyKeywordFilter(Builder $query, string $rawKeyword): void
+    {
+        $extracted = CompactPriceSearch::extract($rawKeyword);
+        $textKeyword = $extracted['text'] !== '' ? $extracted['text'] : (
+            $extracted['prices'] === [] ? $rawKeyword : ''
+        );
+
+        $query->where(function (Builder $q) use ($textKeyword, $rawKeyword, $extracted) {
+            $hasCondition = false;
+
+            if ($textKeyword !== '') {
+                $q->where(function (Builder $textQ) use ($textKeyword) {
+                    $this->applyKeywordTextFilter($textQ, $textKeyword);
+                });
+                $hasCondition = true;
+            }
+
+            foreach ($extracted['prices'] as $priceSpec) {
+                $method = $hasCondition ? 'orWhere' : 'where';
+                $q->{$method}(function (Builder $priceQ) use ($priceSpec) {
+                    $this->applyKeywordPriceFilter($priceQ, $priceSpec);
+                });
+                $hasCondition = true;
+            }
+
+            if (!$hasCondition) {
+                $this->applyKeywordTextFilter($q, $rawKeyword);
+            }
+        });
+    }
+
+    private function applyKeywordTextFilter(Builder $q, string $rawKeyword): void
     {
         $keyword = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower($rawKeyword)) . '%';
         $exactTag = strtoupper($rawKeyword);
 
-        $query->where(function (Builder $q) use ($keyword, $rawKeyword, $exactTag) {
-            $q->whereRaw('LOWER(COALESCE(property_type, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(listing_type, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(area, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(city, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(project, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(developer, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(currency, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(marked_as, "")) LIKE ?', [$keyword])
-                ->orWhereRaw('CAST(COALESCE(price, 0) AS CHAR) LIKE ?', [$keyword])
-                ->orWhereRaw('CAST(COALESCE(beds, 0) AS CHAR) LIKE ?', [$keyword])
-                ->orWhereRaw('CAST(COALESCE(baths, 0) AS CHAR) LIKE ?', [$keyword])
-                ->orWhereRaw('CAST(COALESCE(size, 0) AS CHAR) LIKE ?', [$keyword])
-                ->orWhereRaw('LOWER(COALESCE(CAST(tags AS CHAR), "")) LIKE ?', [$keyword])
-                ->orWhereJsonContains('tags', $exactTag);
+        $q->whereRaw('LOWER(COALESCE(property_type, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(listing_type, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(area, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(city, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(project, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(developer, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(currency, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(marked_as, "")) LIKE ?', [$keyword])
+            ->orWhereRaw('CAST(COALESCE(price, 0) AS CHAR) LIKE ?', [$keyword])
+            ->orWhereRaw('CAST(COALESCE(beds, 0) AS CHAR) LIKE ?', [$keyword])
+            ->orWhereRaw('CAST(COALESCE(baths, 0) AS CHAR) LIKE ?', [$keyword])
+            ->orWhereRaw('CAST(COALESCE(size, 0) AS CHAR) LIKE ?', [$keyword])
+            ->orWhereRaw('LOWER(COALESCE(CAST(tags AS CHAR), "")) LIKE ?', [$keyword])
+            ->orWhereJsonContains('tags', $exactTag);
 
-            if (ctype_digit($rawKeyword)) {
-                $q->orWhere('listings.id', (int) $rawKeyword);
+        if (ctype_digit($rawKeyword)) {
+            $q->orWhere('listings.id', (int) $rawKeyword);
+        }
+
+        $q->orWhereHas('detail', function (Builder $dq) use ($keyword) {
+            $dq->whereRaw('LOWER(COALESCE(notes, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(additional_notes, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(payment_plan, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(ownership, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(furnished, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(CAST(form_data AS CHAR), "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(CAST(extra AS CHAR), "")) LIKE ?', [$keyword]);
+        })
+            ->orWhereHas('creator', function (Builder $cq) use ($keyword) {
+                $cq->whereRaw('LOWER(COALESCE(name, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(first_name, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(last_name, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(phone, "")) LIKE ?', [$keyword])
+                    ->orWhereRaw('LOWER(COALESCE(email, "")) LIKE ?', [$keyword])
+                    ->orWhereHas('brokerProfile', function (Builder $bpq) use ($keyword) {
+                        $bpq->whereRaw('LOWER(COALESCE(company_name, "")) LIKE ?', [$keyword])
+                            ->orWhereRaw('LOWER(COALESCE(bio, "")) LIKE ?', [$keyword])
+                            ->orWhereRaw('LOWER(COALESCE(brn_number, "")) LIKE ?', [$keyword]);
+                    });
+            })
+            ->orWhereHas('listingReviews', function (Builder $rq) use ($keyword) {
+                $rq->whereRaw('LOWER(COALESCE(review_text, "")) LIKE ?', [$keyword]);
+            });
+    }
+
+    /**
+     * @param  array{amount: float, suffix: ?string, currency: ?string}  $spec
+     */
+    private function applyKeywordPriceFilter(Builder $q, array $spec): void
+    {
+        $priceSql = $this->effectiveListingPriceSql();
+
+        $q->where(function (Builder $priceQ) use ($spec, $priceSql) {
+            if ($spec['suffix'] === 'k') {
+                $kValue = $spec['amount'] / 1_000;
+                $priceQ->whereRaw("ROUND({$priceSql} / 1000) = ?", [$kValue])
+                    ->orWhereRaw("ROUND({$priceSql} / 1000, 1) = ?", [$kValue]);
+            } elseif ($spec['suffix'] === 'm') {
+                $mValue = $spec['amount'] / 1_000_000;
+                $priceQ->whereRaw("ROUND({$priceSql} / 1000000, 1) = ?", [$mValue])
+                    ->orWhereRaw("ROUND({$priceSql} / 1000000) = ?", [$mValue]);
+            } elseif ($spec['suffix'] === 'b') {
+                $bValue = $spec['amount'] / 1_000_000_000;
+                $priceQ->whereRaw("ROUND({$priceSql} / 1000000000, 2) = ?", [$bValue]);
+            } else {
+                $margin = max($spec['amount'] * 0.05, 1_000);
+                $priceQ->whereRaw("{$priceSql} BETWEEN ? AND ?", [
+                    $spec['amount'] - $margin,
+                    $spec['amount'] + $margin,
+                ]);
             }
 
-            $q->orWhereHas('detail', function (Builder $dq) use ($keyword) {
-                $dq->whereRaw('LOWER(COALESCE(notes, "")) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(COALESCE(additional_notes, "")) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(COALESCE(payment_plan, "")) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(COALESCE(ownership, "")) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(COALESCE(furnished, "")) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(COALESCE(CAST(form_data AS CHAR), "")) LIKE ?', [$keyword])
-                    ->orWhereRaw('LOWER(COALESCE(CAST(extra AS CHAR), "")) LIKE ?', [$keyword]);
-            })
-                ->orWhereHas('creator', function (Builder $cq) use ($keyword) {
-                    $cq->whereRaw('LOWER(COALESCE(name, "")) LIKE ?', [$keyword])
-                        ->orWhereRaw('LOWER(COALESCE(first_name, "")) LIKE ?', [$keyword])
-                        ->orWhereRaw('LOWER(COALESCE(last_name, "")) LIKE ?', [$keyword])
-                        ->orWhereRaw('LOWER(COALESCE(phone, "")) LIKE ?', [$keyword])
-                        ->orWhereRaw('LOWER(COALESCE(email, "")) LIKE ?', [$keyword])
-                        ->orWhereHas('brokerProfile', function (Builder $bpq) use ($keyword) {
-                            $bpq->whereRaw('LOWER(COALESCE(company_name, "")) LIKE ?', [$keyword])
-                                ->orWhereRaw('LOWER(COALESCE(bio, "")) LIKE ?', [$keyword])
-                                ->orWhereRaw('LOWER(COALESCE(brn_number, "")) LIKE ?', [$keyword]);
-                        });
-                })
-                ->orWhereHas('listingReviews', function (Builder $rq) use ($keyword) {
-                    $rq->whereRaw('LOWER(COALESCE(review_text, "")) LIKE ?', [$keyword]);
-                });
+            if (!empty($spec['currency'])) {
+                $priceQ->whereRaw('LOWER(COALESCE(listings.currency, "")) = ?', [
+                    strtolower($spec['currency']),
+                ]);
+            }
         });
     }
 
