@@ -243,12 +243,10 @@ class ListingController extends Controller
     }
 
     /**
-     * Get listing data for edit screen (owner only).
+     * Get listing data for edit screen.
      */
     public function edit(Request $request, Listing $listing): JsonResponse
     {
-        $this->authorizeListing($request, $listing);
-
         $listing = $this->listingQuery->baseListingQuery($request, false)
             ->whereKey($listing->id)
             ->firstOrFail();
@@ -263,13 +261,11 @@ class ListingController extends Controller
     }
 
     /**
-     * Update listing (owner only) — same body/field names as add-post; only DB columns are written.
+     * Update listing — same body/field names as add-post; only DB columns are written.
      */
     public function update(Request $request, Listing $listing): JsonResponse
     {
         try {
-            $this->authorizeListing($request, $listing);
-
             $listingId = $listing->id;
             $payload = $this->resolveUpdatePayload($request);
             $this->stripExpiryFieldsFromPayload($payload);
@@ -291,7 +287,6 @@ class ListingController extends Controller
             $this->replaceListingMediaOnUpdate($listing, $request);
 
             $listing = $this->listingQuery->baseListingQuery($request, false)
-                ->where('created_by', $request->user()->id)
                 ->whereKey($listingId)
                 ->firstOrFail();
 
@@ -321,11 +316,10 @@ class ListingController extends Controller
     }
 
     /**
-     * Delete listing (owner only).
+     * Delete listing.
      */
     public function destroy(Request $request, Listing $listing)
     {
-        $this->authorizeListing($request, $listing);
         $listing->delete();
 
         return response()->json([
@@ -338,7 +332,6 @@ class ListingController extends Controller
      */
     public function markSold(Request $request, Listing $listing): JsonResponse
     {
-        $this->authorizeListing($request, $listing);
         $listing->marked_as = 'sold';
         $listing->save();
 
@@ -356,7 +349,6 @@ class ListingController extends Controller
      */
     public function markRented(Request $request, Listing $listing): JsonResponse
     {
-        $this->authorizeListing($request, $listing);
         $listing->marked_as = 'rented';
         $listing->save();
 
@@ -528,23 +520,6 @@ class ListingController extends Controller
     private function listingMetricsPayload(Listing $listing): array
     {
         return $this->metricsService->externalTotalsForListing($listing);
-    }
-
-    protected function authorizeListing(Request $request, Listing $listing): void
-    {
-        $user = $request->user();
-
-        if (!$user) {
-            abort(401, 'Unauthenticated.');
-        }
-
-        if (($user->role ?? null) === 'admin') {
-            return;
-        }
-
-        if ($listing->created_by !== $user->id) {
-            abort(403, 'You are not allowed to modify this listing. Reason: this listing belongs to another account.');
-        }
     }
 
     private function resolveListingType(?string $kind): ?string
