@@ -10,12 +10,6 @@ class CommentMutationController extends Controller
 {
     public function update(Request $request, Comment $comment)
     {
-        $user = $request->user();
-
-        if ($comment->user_id !== $user->id) {
-            abort(403, 'You cannot edit this comment.');
-        }
-
         $data = $request->validate([
             'body' => 'required|string|max:5000',
         ]);
@@ -27,12 +21,6 @@ class CommentMutationController extends Controller
 
     public function destroy(Request $request, Comment $comment)
     {
-        $user = $request->user();
-
-        if ($comment->user_id !== $user->id) {
-            abort(403, 'You cannot delete this comment.');
-        }
-
         $comment->delete();
 
         return response()->json(['message' => 'Comment deleted.']);
