@@ -12,6 +12,66 @@ use Illuminate\Support\Str;
 
 class AuthController extends Controller
 {
+    private function isSmtpConfigured(): bool
+    {
+        if (strtolower((string) config('mail.default')) !== 'smtp') {
+            return false;
+        }
+
+        $host = trim((string) config('mail.mailers.smtp.host'));
+        $port = config('mail.mailers.smtp.port');
+        $fromAddress = trim((string) config('mail.from.address'));
+
+        return $host !== '' && $host !== 'mailhog'
+            && !empty($port)
+            && $fromAddress !== '';
+    }
+
+    /**
+     * @param  array{
+     *   name: string,
+     *   first_name: ?string,
+     *   last_name: ?string,
+     *   email: ?string,
+     *   phone: ?string,
+     *   language: ?string,
+     *   password: string,
+     *   short_bio: ?string,
+     *   brn_no: ?string
+     * }  $payload
+     */
+    private function createBrokerUserFromPayload(array $payload): User
+    {
+        $user = User::create([
+            'name' => $payload['name'] ?: ('Broker ' . Str::random(6)),
+            'first_name' => $payload['first_name'] ?? null,
+            'last_name' => $payload['last_name'] ?? null,
+            'email' => $payload['email'] ?? null,
+            'phone' => $payload['phone'] ?? null,
+            'language' => $payload['language'] ?? 'en',
+            'role' => 'broker',
+            'status' => 'active',
+            'phone_notifications' => true,
+            'messages_notifications' => true,
+            'whatsapp_notifications' => true,
+            'account_type' => 'personal',
+            'password' => $payload['password'],
+        ]);
+
+        BrokerProfile::create([
+            'user_id' => $user->id,
+            'company_name' => '',
+            'verified' => true,
+            'is_active' => true,
+            'show_whatsapp' => true,
+            'experience_years' => 0,
+            'bio' => $payload['short_bio'] ?? null,
+            'brn_number' => $payload['brn_no'] ?? null,
+        ]);
+
+        return $user;
+    }
+
     private function normalizeAuthIdentifiers(Request $request): array
     {
         $phone = $request->input('phone', $request->input('mobile', $request->input('mobileNumber', $request->input('phone_number'))));
@@ -231,15 +291,7 @@ class AuthController extends Controller
             ], 422);
         }
 
-        $channel = !empty($data['phone']) ? 'phone' : 'email';
-        $identifier = $channel === 'phone' ? $data['phone'] : $data['email'];
-
-        $otp = random_int(100000, 999999);
-        $otpKey = "otp:signup:{$channel}:{$identifier}";
-        $pendingKey = "signup:pending:{$channel}:{$identifier}";
-
-        Cache::put($otpKey, (string) $otp, now()->addMinutes(5));
-        Cache::put($pendingKey, json_encode([
+        $pendingPayload = [
             'name' => $derivedName,
             'first_name' => $data['first_name'] ?? $data['full_name'] ?? $data['name'],
             'last_name' => $data['last_name'] ?? null,
@@ -249,7 +301,26 @@ class AuthController extends Controller
             'password' => Hash::make($data['password']),
             'short_bio' => $data['short_bio'] ?? null,
             'brn_no' => $data['brn_no'] ?? null,
-        ]), now()->addMinutes(5));
+        ];
+
+        if (!$this->isSmtpConfigured()) {
+            $this->createBrokerUserFromPayload($pendingPayload);
+
+            return response()->json([
+                'message' => 'Signup successful.',
+                'otp_required' => false,
+            ]);
+        }
+
+        $channel = !empty($data['phone']) ? 'phone' : 'email';
+        $identifier = $channel === 'phone' ? $data['phone'] : $data['email'];
+
+        $otp = random_int(100000, 999999);
+        $otpKey = "otp:signup:{$channel}:{$identifier}";
+        $pendingKey = "signup:pending:{$channel}:{$identifier}";
+
+        Cache::put($otpKey, (string) $otp, now()->addMinutes(5));
+        Cache::put($pendingKey, json_encode($pendingPayload), now()->addMinutes(5));
 
         return response()->json([
             'message' => 'OTP sent successfully. Please verify to complete signup.',
@@ -346,31 +417,16 @@ class AuthController extends Controller
             ], 422);
         }
 
-        $user = User::create([
+        $user = $this->createBrokerUserFromPayload([
             'name' => $pending['name'] ?? ('Broker ' . Str::random(6)),
             'first_name' => $pending['first_name'] ?? null,
             'last_name' => $pending['last_name'] ?? null,
             'email' => $pending['email'] ?? null,
             'phone' => $pending['phone'] ?? null,
             'language' => $pending['language'] ?? 'en',
-            'role' => 'broker',
-            'status' => 'active',
-            'phone_notifications' => true,
-            'messages_notifications' => true,
-            'whatsapp_notifications' => true,
-            'account_type' => 'personal',
             'password' => $pending['password'] ?? bcrypt(Str::random(32)),
-        ]);
-
-        BrokerProfile::create([
-            'user_id' => $user->id,
-            'company_name' => '',
-            'verified' => true,
-            'is_active' => true,
-            'show_whatsapp' => true,
-            'experience_years' => 0,
-            'bio' => $pending['short_bio'] ?? null,
-            'brn_number' => $pending['brn_no'] ?? null,
+            'short_bio' => $pending['short_bio'] ?? null,
+            'brn_no' => $pending['brn_no'] ?? null,
         ]);
 
         Cache::forget($otpKey);
