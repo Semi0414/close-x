@@ -46,14 +46,11 @@ class SavedSearchController extends Controller
 
     public function show(Request $request, SavedSearch $savedSearch)
     {
-        $this->assertOwner($request, $savedSearch);
-
         return response()->json($savedSearch);
     }
 
     public function update(Request $request, SavedSearch $savedSearch)
     {
-        $this->assertOwner($request, $savedSearch);
         $payload = $this->normalizedPayload($request);
 
         $data = validator($payload, [
@@ -70,7 +67,6 @@ class SavedSearchController extends Controller
 
     public function destroy(Request $request, SavedSearch $savedSearch)
     {
-        $this->assertOwner($request, $savedSearch);
         $savedSearch->delete();
 
         return response()->json(['message' => 'Saved search deleted.']);
@@ -78,8 +74,6 @@ class SavedSearchController extends Controller
 
     public function toggleAlerts(Request $request, SavedSearch $savedSearch)
     {
-        $this->assertOwner($request, $savedSearch);
-
         $savedSearch->alerts_enabled = !$savedSearch->alerts_enabled;
         $savedSearch->save();
 
@@ -91,8 +85,6 @@ class SavedSearchController extends Controller
      */
     public function run(Request $request, SavedSearch $savedSearch)
     {
-        $this->assertOwner($request, $savedSearch);
-
         $query = $this->listingQuery->baseListingQuery($request, true);
         $this->listingQuery->applyFiltersArray($query, $savedSearch->filters ?? []);
         $query->orderByDesc('created_at');
@@ -116,13 +108,6 @@ class SavedSearchController extends Controller
                 'has_more_pages' => $paginator->hasMorePages(),
             ],
         ]);
-    }
-
-    private function assertOwner(Request $request, SavedSearch $savedSearch): void
-    {
-        if ($savedSearch->user_id !== $request->user()->id) {
-            abort(403, 'You do not own this saved search.');
-        }
     }
 
     /**
