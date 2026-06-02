@@ -108,9 +108,10 @@ Route::middleware(['auth:sanctum', 'approved'])
         Route::put('/listings/{listing}', [ListingController::class, 'update']);
         Route::patch('/listings/{listing}', [ListingController::class, 'update']);
         Route::delete('/listings/{listing}', [ListingController::class, 'destroy']);
+        Route::post('/listings/{listing}/delete', [ListingController::class, 'destroy']); // compatibility alias
         Route::post('/listings/{listing}/extend-expiry', [ListingController::class, 'extendExpiry']);
-        Route::post('/listings/{listing}/mark-sold', [ListingController::class, 'markSold']);
-        Route::post('/listings/{listing}/mark-rented', [ListingController::class, 'markRented']);
+        Route::match(['post', 'put', 'patch'], '/listings/{listing}/mark-sold', [ListingController::class, 'markSold']);
+        Route::match(['post', 'put', 'patch'], '/listings/{listing}/mark-rented', [ListingController::class, 'markRented']);
 
         Route::get('/listings/{listing}/views-count', [ListingMetricsController::class, 'getViews']);
         Route::post('/listings/{listing}/views-count', [ListingMetricsController::class, 'postViews']);

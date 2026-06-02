@@ -527,7 +527,17 @@ class ListingController extends Controller
 
     protected function authorizeListing(Request $request, Listing $listing): void
     {
-        if ($listing->created_by !== $request->user()->id) {
+        $user = $request->user();
+
+        if (!$user) {
+            abort(401, 'Unauthenticated.');
+        }
+
+        if (($user->role ?? null) === 'admin') {
+            return;
+        }
+
+        if ($listing->created_by !== $user->id) {
             abort(403, 'You are not allowed to modify this listing.');
         }
     }
