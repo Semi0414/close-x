@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class ListingController extends Controller
 {
@@ -307,6 +308,10 @@ class ListingController extends Controller
                 'error' => $e->getMessage(),
                 'errors' => $e->errors(),
             ], 422);
+        } catch (HttpExceptionInterface $e) {
+            return response()->json([
+                'message' => $e->getMessage() ?: 'Request failed.',
+            ], $e->getStatusCode());
         } catch (\Throwable $e) {
             return response()->json([
                 'message' => 'Failed to update listing.',
@@ -538,7 +543,7 @@ class ListingController extends Controller
         }
 
         if ($listing->created_by !== $user->id) {
-            abort(403, 'You are not allowed to modify this listing.');
+            abort(403, 'You are not allowed to modify this listing. Reason: this listing belongs to another account.');
         }
     }
 

@@ -6,6 +6,7 @@ use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Exceptions\Handler as ExceptionHandler;
 use Illuminate\Http\Request;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 use Throwable;
 
 class Handler extends ExceptionHandler
@@ -61,6 +62,15 @@ class Handler extends ExceptionHandler
                 return response()->json([
                     'message' => 'Unauthenticated.',
                 ], 401);
+            }
+
+            if ($e instanceof HttpExceptionInterface) {
+                $status = $e->getStatusCode();
+                if ($status === 403) {
+                    return response()->json([
+                        'message' => $e->getMessage() ?: 'Forbidden.',
+                    ], 403);
+                }
             }
         }
 
