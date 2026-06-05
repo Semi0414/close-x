@@ -269,6 +269,7 @@ class ListingController extends Controller
             $listingId = $listing->id;
             $payload = $this->resolveUpdatePayload($request);
             $this->stripExpiryFieldsFromPayload($payload);
+            $this->normalizeListingIntentInPayload($payload);
 
             $formData = $this->extractFormDataFromPostPayload($payload, $request);
             $this->stripExpiryFieldsFromPayload($formData);
@@ -279,6 +280,10 @@ class ListingController extends Controller
             if (!empty($formData)) {
                 $data = $this->applyFormDataToListingPayload($data, $formData);
                 $this->stripExpiryFieldsFromPayload($data);
+            }
+
+            if (array_key_exists('kind', $data) && !$this->isBlankValue($data['kind'])) {
+                $formData['kind'] = $data['kind'];
             }
 
             $this->stripBlankOptionalNotes($data, $formData);
@@ -845,6 +850,47 @@ class ListingController extends Controller
         return in_array(strtolower(trim($value)), ['active', 'sold', 'rented', 'expired'], true);
     }
 
+    /**
+     * App "Status" (for rent / for sale / buy request) is listing intent, not DB lifecycle status.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function normalizeListingIntentInPayload(array &$payload): void
+    {
+        if (!array_key_exists('status', $payload) || $this->isBlankValue($payload['status'])) {
+            return;
+        }
+
+        $status = $payload['status'];
+        if ($this->isValidListingLifecycleStatus($status)) {
+            return;
+        }
+
+        if (!array_key_exists('kind', $payload) || $this->isBlankValue($payload['kind'])) {
+            $payload['kind'] = $status;
+        }
+
+        unset($payload['status']);
+    }
+
+    private function syncListingIntentTags(Listing $listing, string $kind): void
+    {
+        $normalized = strtolower(trim(str_replace('_', ' ', $kind)));
+        $tags = is_array($listing->tags) ? $listing->tags : [];
+
+        $tags = array_values(array_filter($tags, function ($tag) {
+            $upper = strtoupper(str_replace('_', ' ', (string) $tag));
+
+            return !in_array($upper, ['RENT REQUEST', 'BUY REQUEST'], true);
+        }));
+
+        if (in_array($normalized, ['rent request', 'buy request'], true)) {
+            $tags[] = strtoupper($normalized);
+        }
+
+        $listing->tags = $tags;
+    }
+
     private function shouldSkipFormDataKey(string $key): bool
     {
         $normalized = $this->normalizeFormDataKey($key);
@@ -948,6 +994,7 @@ class ListingController extends Controller
             'formData' => 'nullable',
             'listing_type' => 'nullable|in:sale,rent,requirement',
             'kind' => 'nullable|string|max:255',
+            'status' => 'nullable|string|max:255',
             'property_type' => 'nullable|string|max:255',
             'title' => 'nullable|string|max:255',
             'price' => 'nullable|numeric',
@@ -1329,6 +1376,10 @@ class ListingController extends Controller
 
         if ($sent('tags')) {
             $listing->tags = $this->normalizeTags($data['tags'] ?? []);
+        }
+
+        if ($sent('kind') && !$this->isBlankValue($data['kind'])) {
+            $this->syncListingIntentTags($listing, (string) $data['kind']);
         }
 
         if ($sent('status') && $this->isValidListingLifecycleStatus($data['status'])) {

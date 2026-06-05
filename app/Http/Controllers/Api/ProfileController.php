@@ -205,7 +205,7 @@ class ProfileController extends Controller
         if (array_key_exists('profile_picture', $data)) {
             if ($request->hasFile('profile_picture')) {
                 $request->validate([
-                    'profile_picture' => 'file|image|mimes:jpg,jpeg,png,webp|max:5120',
+                    'profile_picture' => 'file|image|mimes:jpg,jpeg,png,webp',
                 ]);
                 $user->profile_photo = $this->storePublicFile($request->file('profile_picture'), 'profiles/pictures');
             } elseif (is_string($data['profile_picture']) || is_null($data['profile_picture'])) {

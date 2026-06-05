@@ -109,10 +109,19 @@ class ListingQueryService
             $this->applyListingIntentFilter($query, (string) $filters['listing_type']);
         }
 
+        if ($this->hasFilterValue($filters, 'location')) {
+            $this->applyLocationFilter($query, (string) $filters['location']);
+        }
+
         if ($this->hasFilterValue($filters, 'city')) {
-            $this->applyLikeFilterOnListingOrFormData($query, (string) $filters['city'], [
-                'city',
-            ]);
+            $city = (string) $filters['city'];
+            if (str_contains(trim($city), ' ')) {
+                $this->applyLocationFilter($query, $city);
+            } else {
+                $this->applyLikeFilterOnListingOrFormData($query, $city, [
+                    'city',
+                ]);
+            }
         }
 
         if ($this->hasFilterValue($filters, 'area')) {
@@ -208,7 +217,6 @@ class ListingQueryService
             'isOffPlan' => 'is_off_plan',
             'minBeds' => 'min_beds',
             'min_beds' => 'min_beds',
-            'location' => 'city',
             'keyword' => 'keyword',
         ];
 
@@ -361,6 +369,69 @@ class ListingQueryService
     }
 
     /**
+     * Location filter: match area names (e.g. Dubai Hills) without returning every Dubai listing.
+     */
+    private function applyLocationFilter(Builder $query, string $location): void
+    {
+        $phrase = trim($location);
+        if ($phrase === '') {
+            return;
+        }
+
+        $query->where(function (Builder $outer) use ($phrase) {
+            $this->applyLocationPhraseMatch($outer, $phrase);
+        });
+    }
+
+    /**
+     * Multi-word AI/keyword searches that look like a place name (Dubai Hills, Downtown Dubai).
+     */
+    private function shouldUseLocationFocusedKeywordSearch(string $rawKeyword): bool
+    {
+        $trimmed = trim($rawKeyword);
+        if ($trimmed === '' || !str_contains($trimmed, ' ')) {
+            return false;
+        }
+
+        return (bool) preg_match('/^[a-zA-Z][a-zA-Z\\s.,\\-\\\']+$/', $trimmed);
+    }
+
+    private function applyKeywordLocationFocusedFilter(Builder $q, string $rawKeyword): void
+    {
+        $keyword = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower(trim($rawKeyword))) . '%';
+
+        $q->where(function (Builder $outer) use ($rawKeyword, $keyword) {
+            $this->applyLocationPhraseMatch($outer, $rawKeyword);
+
+            $outer->orWhereRaw('LOWER(COALESCE(property_type, "")) LIKE ?', [$keyword])
+                ->orWhereRaw('LOWER(COALESCE(project, "")) LIKE ?', [$keyword]);
+        });
+    }
+
+    private function applyLocationPhraseMatch(Builder $query, string $phrase): void
+    {
+        $needle = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower(trim($phrase))) . '%';
+
+        $query->where(function (Builder $q) use ($needle) {
+            $q->whereRaw("LOWER(COALESCE(area, '')) LIKE ?", [$needle])
+                ->orWhereRaw("LOWER(COALESCE(city, '')) LIKE ?", [$needle])
+                ->orWhereRaw("LOWER(COALESCE(project, '')) LIKE ?", [$needle])
+                ->orWhereRaw("LOWER(CONCAT(COALESCE(city, ''), ' ', COALESCE(area, ''))) LIKE ?", [$needle])
+                ->orWhereRaw("LOWER(CONCAT(COALESCE(area, ''), ' ', COALESCE(city, ''))) LIKE ?", [$needle])
+                ->orWhereHas('detail', function (Builder $detailQuery) use ($needle) {
+                    $detailQuery->where(function (Builder $formMatch) use ($needle) {
+                        foreach (['$.city', '$.area', '$.project', '$.location', '$.City', '$.Area'] as $jsonPath) {
+                            $formMatch->orWhereRaw(
+                                "LOWER(TRIM(JSON_UNQUOTE(JSON_EXTRACT(form_data, ?)))) LIKE ?",
+                                [$jsonPath, $needle]
+                            );
+                        }
+                    });
+                });
+        });
+    }
+
+    /**
      * @param  list<string>  $listingColumns
      */
     private function applyLikeFilterOnListingOrFormData(Builder $query, string $value, array $listingColumns): void
@@ -415,6 +486,12 @@ class ListingQueryService
 
     private function applyKeywordTextFilter(Builder $q, string $rawKeyword): void
     {
+        if ($this->shouldUseLocationFocusedKeywordSearch($rawKeyword)) {
+            $this->applyKeywordLocationFocusedFilter($q, $rawKeyword);
+
+            return;
+        }
+
         $keyword = '%' . str_replace(['%', '_'], ['\\%', '\\_'], strtolower($rawKeyword)) . '%';
         $exactTag = strtoupper($rawKeyword);
 
