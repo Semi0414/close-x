@@ -272,6 +272,7 @@ class ListingController extends Controller
             );
             $this->stripExpiryFieldsFromPayload($payload);
             $this->normalizeListingIntentInPayload($payload);
+            $explicitListingIntent = $this->extractExplicitListingIntentFromPayload($payload);
 
             $formData = $this->normalizeListingFieldKeysInPayload(
                 $this->extractFormDataFromPostPayload($payload, $request)
@@ -286,10 +287,17 @@ class ListingController extends Controller
                 $this->stripExpiryFieldsFromPayload($data);
             }
 
-            $resolvedKind = $this->resolveKindForListingUpdate($data, $formData);
-            if ($resolvedKind !== null) {
-                $data['kind'] = $resolvedKind;
-                $formData['kind'] = $resolvedKind;
+            if ($explicitListingIntent !== null) {
+                // posts[0][kind] / status must win over stale values inside form-data JSON.
+                $data['kind'] = $explicitListingIntent;
+                $formData['kind'] = $explicitListingIntent;
+                unset($formData['status']);
+            } else {
+                $resolvedKind = $this->resolveKindForListingUpdate($data, $formData);
+                if ($resolvedKind !== null) {
+                    $data['kind'] = $resolvedKind;
+                    $formData['kind'] = $resolvedKind;
+                }
             }
 
             $this->stripBlankOptionalNotes($data, $formData);
@@ -907,6 +915,26 @@ class ListingController extends Controller
         }
 
         return $normalized;
+    }
+
+    /**
+     * Top-level posts[0][kind] or posts[0][status] sent on update (before form-data merge).
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function extractExplicitListingIntentFromPayload(array $payload): ?string
+    {
+        if (array_key_exists('kind', $payload) && !$this->isBlankValue($payload['kind'])) {
+            return trim((string) $payload['kind']);
+        }
+
+        if (array_key_exists('status', $payload)
+            && !$this->isBlankValue($payload['status'])
+            && !$this->isValidListingLifecycleStatus($payload['status'])) {
+            return trim((string) $payload['status']);
+        }
+
+        return null;
     }
 
     /**
