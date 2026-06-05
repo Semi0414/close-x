@@ -11,12 +11,26 @@ use Illuminate\Support\Facades\DB;
 class ListingMetricsService
 {
     /**
-     * Record metric from another user (owner actions are ignored).
+     * Whether this user already has a recorded event for this listing + metric.
      */
-    public function recordFromUser(Listing $listing, int $actorUserId, string $metric): bool
+    public function userAlreadyRecorded(Listing $listing, int $actorUserId, string $metric): bool
+    {
+        return ListingMetricEvent::query()
+            ->where('listing_id', $listing->id)
+            ->where('user_id', $actorUserId)
+            ->where('metric', $metric)
+            ->exists();
+    }
+
+    /**
+     * Record metric from another user (owner + duplicate actions are ignored).
+     *
+     * @return array{recorded: bool, reason: string}
+     */
+    public function recordFromUser(Listing $listing, int $actorUserId, string $metric): array
     {
         if ($listing->created_by === $actorUserId) {
-            return false;
+            return ['recorded' => false, 'reason' => 'listing_owner'];
         }
 
         if (!in_array($metric, [
@@ -24,7 +38,11 @@ class ListingMetricsService
             ListingMetricEvent::METRIC_CLICK,
             ListingMetricEvent::METRIC_LEAD,
         ], true)) {
-            return false;
+            return ['recorded' => false, 'reason' => 'invalid_metric'];
+        }
+
+        if ($this->userAlreadyRecorded($listing, $actorUserId, $metric)) {
+            return ['recorded' => false, 'reason' => 'already_counted'];
         }
 
         ListingMetricEvent::create([
@@ -44,7 +62,7 @@ class ListingMetricsService
             $listing->increment($column);
         }
 
-        return true;
+        return ['recorded' => true, 'reason' => 'new'];
     }
 
     /**

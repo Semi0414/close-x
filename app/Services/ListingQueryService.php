@@ -24,7 +24,7 @@ class ListingQueryService
         $user = $request->user();
 
         $query = Listing::query()
-            ->with(['creator.brokerProfile', 'media', 'detail']);
+            ->with(['creator.brokerProfile', 'creator.agency', 'media', 'detail']);
 
         if ($activeOnly) {
             $query->where('status', 'active')
@@ -577,6 +577,29 @@ class ListingQueryService
                     $this->formDataNormalizer->normalize($formData)
                 );
             }
+        }
+
+        if ($listing->relationLoaded('creator') && $listing->creator !== null) {
+            $this->transformCreatorForResponse($listing->creator);
+        }
+    }
+
+    private function transformCreatorForResponse(\App\Models\User $creator): void
+    {
+        $creator->loadMissing(['brokerProfile', 'agency']);
+
+        $accountType = $creator->account_type ?? 'personal';
+        $agencyName = ($accountType === 'agency') ? ($creator->agency?->name) : null;
+
+        $creator->setAttribute('agency_name', $agencyName);
+
+        if ($accountType === 'agency' && $creator->relationLoaded('agency') && $creator->agency !== null) {
+            $creator->agency->setAttribute('agency_name', $creator->agency->name);
+        }
+
+        if ($creator->relationLoaded('brokerProfile') && $creator->brokerProfile !== null) {
+            $creator->brokerProfile->setAttribute('account_type', $accountType);
+            $creator->brokerProfile->setAttribute('agency_name', $agencyName);
         }
     }
 

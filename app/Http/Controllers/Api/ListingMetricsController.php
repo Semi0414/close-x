@@ -69,25 +69,25 @@ class ListingMetricsController extends Controller
     private function recordMetric(Request $request, Listing $listing, string $metric, string $label): JsonResponse
     {
         $actor = $request->user();
+        $result = $this->metricsService->recordFromUser($listing, $actor->id, $metric);
+        $listing->refresh();
 
-        if ($listing->created_by === $actor->id) {
-            return response()->json([
-                'message' => 'Your own ' . $label . ' on your listing is not tracked.',
-                'recorded' => false,
-                'listing_id' => $listing->id,
-                'external_metrics' => $this->metricsService->externalTotalsForListing($listing),
-                'my_listings_totals' => $this->metricsService->dashboardForUser($actor->id),
-            ]);
-        }
-
-        $this->metricsService->recordFromUser($listing, $actor->id, $metric);
+        $message = match ($result['reason']) {
+            'listing_owner' => 'Your own ' . $label . ' on your listing is not tracked.',
+            'already_counted' => 'This ' . $label . ' was already counted for your account on this listing.',
+            'new' => ucfirst($label) . ' recorded.',
+            default => ucfirst($label) . ' was not recorded.',
+        };
 
         return response()->json([
-            'message' => ucfirst($label) . ' recorded.',
-            'recorded' => true,
+            'message' => $message,
+            'recorded' => $result['recorded'],
+            'reason' => $result['reason'],
             'listing_id' => $listing->id,
-            'external_metrics' => $this->metricsService->externalTotalsForListing($listing->fresh()),
-            'my_listings_totals' => $this->metricsService->dashboardForUser($listing->created_by),
+            'external_metrics' => $this->metricsService->externalTotalsForListing($listing),
+            'my_listings_totals' => $this->metricsService->dashboardForUser(
+                $listing->created_by === $actor->id ? $actor->id : $listing->created_by
+            ),
         ]);
     }
 
