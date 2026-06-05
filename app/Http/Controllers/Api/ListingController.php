@@ -13,6 +13,7 @@ use App\Support\ListingFormDataNormalizer;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
@@ -1815,7 +1816,9 @@ class ListingController extends Controller
         ];
 
         $payloadFiles = $this->resolveIncomingPostFiles($request);
-        if (!empty($payloadFiles[0])) {
+        $collectedFromPostsArray = !empty($payloadFiles[0]);
+
+        if ($collectedFromPostsArray) {
             foreach (array_keys($files) as $field) {
                 $files[$field] = array_merge(
                     $files[$field],
@@ -1832,13 +1835,52 @@ class ListingController extends Controller
                 );
             }
 
-            $nested = $request->file('posts.0.' . $field);
-            if ($nested !== null) {
-                $files[$field] = array_merge($files[$field], $this->normalizeFileGroup($nested));
+            // posts.0.images is the same upload as posts[0][images] — skip when already collected.
+            if (!$collectedFromPostsArray) {
+                $nested = $request->file('posts.0.' . $field);
+                if ($nested !== null) {
+                    $files[$field] = array_merge(
+                        $files[$field],
+                        $this->normalizeFileGroup($nested)
+                    );
+                }
             }
         }
 
-        return $files;
+        return $this->deduplicateUploadedFileGroups($files);
+    }
+
+    /**
+     * @param  array{images: array, videos: array, documents: array}  $filesByGroup
+     * @return array{images: array, videos: array, documents: array}
+     */
+    private function deduplicateUploadedFileGroups(array $filesByGroup): array
+    {
+        foreach ($filesByGroup as $field => $group) {
+            $seen = [];
+            $unique = [];
+
+            foreach ($group as $file) {
+                if (!$file) {
+                    continue;
+                }
+
+                $key = $file instanceof UploadedFile
+                    ? sha1($file->getRealPath() . '|' . $file->getClientOriginalName() . '|' . $file->getSize())
+                    : spl_object_hash($file);
+
+                if (isset($seen[$key])) {
+                    continue;
+                }
+
+                $seen[$key] = true;
+                $unique[] = $file;
+            }
+
+            $filesByGroup[$field] = $unique;
+        }
+
+        return $filesByGroup;
     }
 
     private function deleteListingMediaByType(Listing $listing, string $type): void
