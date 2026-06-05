@@ -1812,8 +1812,10 @@ class ListingController extends Controller
     }
 
     /**
-     * On update: sync listing_media — posts[0][images][] may contain listing_media id, URL, or new file upload.
-     * Rows not in the keep list are deleted from listing_media.
+     * On update, sync listing_media for this listing only:
+     * - posts[0][images][] empty  → delete all rows where listing_id + type match
+     * - posts[0][images][] has id/url → keep only those rows, delete the rest (+ add new file uploads)
+     * Same rules for videos (type=video) and documents (type=doc).
      */
     private function syncListingMediaOnUpdate(Listing $listing, Request $request): void
     {
@@ -1954,12 +1956,6 @@ class ListingController extends Controller
             return true;
         }
 
-        foreach ($this->resolveUpdateFormDataSources($request) as $formData) {
-            if (array_key_exists($field, $formData)) {
-                return true;
-            }
-        }
-
         return false;
     }
 
@@ -2055,8 +2051,7 @@ class ListingController extends Controller
             $valueSources[] = $request->input((string) $key);
         }
 
-        // form-data may include an images key when the user removes media in the app UI.
-        // Trigger sync via wasUpdateMediaFieldProvided(), but never treat form-data URLs as keep-list entries.
+        // Keep list comes only from posts[0][images][] / images[] / file uploads — not form-data JSON.
         foreach ($valueSources as $value) {
             foreach ($this->normalizeFileGroup($value) as $item) {
                 if ($item instanceof UploadedFile) {
@@ -2132,6 +2127,12 @@ class ListingController extends Controller
 
         $existingIds = $listing->media()->where('type', $type)->pluck('id')->all();
         $keepIds = array_values(array_intersect($keepIds, array_map('intval', $existingIds)));
+
+        if ($keepUrls === [] && $keepIds === [] && $newFiles === []) {
+            $this->deleteListingMediaByType($listing, $type);
+
+            return;
+        }
 
         $normalizedKeep = [];
         foreach ($keepUrls as $url) {

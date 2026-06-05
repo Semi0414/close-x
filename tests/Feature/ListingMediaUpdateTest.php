@@ -188,7 +188,7 @@ class ListingMediaUpdateTest extends TestCase
         $this->assertSame(0, $listing->media()->where('type', 'image')->count());
     }
 
-    public function test_multipart_remove_with_stale_form_data_images_removes_uploaded_image(): void
+    public function test_multipart_remove_with_empty_posts_images_deletes_all_for_listing(): void
     {
         Storage::fake('public');
 
@@ -203,41 +203,38 @@ class ListingMediaUpdateTest extends TestCase
             'images' => [$file],
         ])->assertOk();
 
-        $mediaUrl = $listing->media()->first()->url;
-
         $this->post("/api/listings/{$listing->id}/update", [
-            'form-data' => json_encode([
-                'images' => [$mediaUrl],
-            ]),
+            'posts' => [
+                0 => [
+                    'images' => [],
+                ],
+            ],
             'price' => 1500000,
         ])->assertOk();
 
         $this->assertSame(0, $listing->media()->where('type', 'image')->count());
     }
 
-    public function test_multipart_remove_with_empty_form_data_images_removes_image(): void
+    public function test_update_with_posts_images_urls_keeps_only_sent_urls_for_listing(): void
     {
-        Storage::fake('public');
-
         $user = $this->actingBroker();
-        $listing = Listing::factory()->create(['created_by' => $user->id]);
+        $listing = $this->listingWithMedia($user);
 
         Sanctum::actingAs($user);
 
-        $file = UploadedFile::fake()->image('new-listing.jpg');
-
         $this->post("/api/listings/{$listing->id}/update", [
-            'images' => [$file],
+            'posts' => [
+                0 => [
+                    'images' => ['http://localhost/storage/listing-media/keep.jpg'],
+                ],
+            ],
         ])->assertOk();
 
-        $this->post("/api/listings/{$listing->id}/update", [
-            'form-data' => json_encode([
-                'images' => [],
-            ]),
-            'price' => 1500000,
-        ])->assertOk();
-
-        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertStringContainsString(
+            'keep.jpg',
+            (string) $listing->media()->first()->getRawOriginal('url')
+        );
     }
 
     public function test_update_with_posts_images_ids_keeps_listed_and_deletes_omitted_from_listing_media(): void
