@@ -6,6 +6,8 @@ use App\Models\Listing;
 use App\Models\ListingMedia;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 use Laravel\Sanctum\Sanctum;
 use Tests\TestCase;
 
@@ -69,7 +71,7 @@ class ListingMediaUpdateTest extends TestCase
         $this->assertStringContainsString('keep.jpg', $urls[0]);
     }
 
-    public function test_update_with_form_data_images_syncs_listing_media(): void
+    public function test_update_with_form_data_images_key_triggers_sync_without_using_form_data_urls(): void
     {
         $user = $this->actingBroker();
         $listing = $this->listingWithMedia($user);
@@ -80,6 +82,7 @@ class ListingMediaUpdateTest extends TestCase
             'form-data' => json_encode([
                 'images' => ['http://localhost/storage/listing-media/keep.jpg'],
             ]),
+            'images' => ['http://localhost/storage/listing-media/keep.jpg'],
         ])->assertOk();
 
         $urls = $listing->media()->where('type', 'image')->orderBy('order')->pluck('url')->all();
@@ -103,5 +106,157 @@ class ListingMediaUpdateTest extends TestCase
         ])->assertOk();
 
         $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_multipart_file_upload_then_explicit_empty_images_removes_uploaded_image(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = Listing::factory()->create(['created_by' => $user->id]);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('new-listing.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'images' => [$file],
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'images' => [],
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_multipart_remove_without_images_field_skips_sync_and_keeps_image(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = Listing::factory()->create(['created_by' => $user->id]);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('new-listing.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'images' => [$file],
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'price' => 1500000,
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_multipart_upload_via_posts_array_then_remove_with_empty_posts_images(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = Listing::factory()->create(['created_by' => $user->id]);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('upload.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'images' => [$file],
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'images' => [],
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_multipart_remove_with_stale_form_data_images_removes_uploaded_image(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = Listing::factory()->create(['created_by' => $user->id]);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('new-listing.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'images' => [$file],
+        ])->assertOk();
+
+        $mediaUrl = $listing->media()->first()->url;
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'form-data' => json_encode([
+                'images' => [$mediaUrl],
+            ]),
+            'price' => 1500000,
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_multipart_remove_with_empty_form_data_images_removes_image(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = Listing::factory()->create(['created_by' => $user->id]);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('new-listing.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'images' => [$file],
+        ])->assertOk();
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'form-data' => json_encode([
+                'images' => [],
+            ]),
+            'price' => 1500000,
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_update_with_remove_media_ids_removes_specific_image(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $removeId = $listing->media()->orderBy('order')->skip(1)->value('id');
+
+        $this->postJson("/api/listings/{$listing->id}/update", [
+            'remove_media_ids' => [$removeId],
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertStringContainsString(
+            'keep.jpg',
+            (string) $listing->media()->first()->getRawOriginal('url')
+        );
     }
 }

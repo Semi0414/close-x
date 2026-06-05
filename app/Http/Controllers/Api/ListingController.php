@@ -1816,6 +1816,8 @@ class ListingController extends Controller
      */
     private function syncListingMediaOnUpdate(Listing $listing, Request $request): void
     {
+        $this->removeRequestedListingMedia($listing, $request);
+
         $groups = [
             'images' => 'image',
             'videos' => 'video',
@@ -1833,9 +1835,92 @@ class ListingController extends Controller
                 $type,
                 $field,
                 $sync['keep_urls'],
+                $sync['keep_ids'],
                 $sync['new_files']
             );
         }
+    }
+
+    private function removeRequestedListingMedia(Listing $listing, Request $request): void
+    {
+        $ids = $this->collectRemoveMediaIds($request);
+        if ($ids === []) {
+            return;
+        }
+
+        $listing->media()
+            ->where('listing_id', $listing->id)
+            ->whereIn('id', $ids)
+            ->get()
+            ->each(function (ListingMedia $media) {
+                $this->deleteStoredMediaFile($media->getRawOriginal('url') ?? $media->url);
+                $media->delete();
+            });
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function collectRemoveMediaIds(Request $request): array
+    {
+        $ids = [];
+
+        foreach ([
+            'remove_media_ids',
+            'removed_media_ids',
+            'delete_media_ids',
+            'remove_images',
+            'removed_images',
+            'delete_images',
+            'remove_videos',
+            'removed_videos',
+            'delete_videos',
+            'remove_documents',
+            'removed_documents',
+            'delete_documents',
+        ] as $key) {
+            $ids = array_merge($ids, $this->normalizeRemoveMediaIds($request->input($key)));
+            $ids = array_merge($ids, $this->normalizeRemoveMediaIds($request->input("posts.0.{$key}")));
+        }
+
+        $posts = $request->input('posts');
+        if (is_array($posts) && isset($posts[0]) && is_array($posts[0])) {
+            foreach ([
+                'remove_media_ids',
+                'removed_media_ids',
+                'delete_media_ids',
+                'remove_images',
+                'removed_images',
+                'delete_images',
+            ] as $key) {
+                if (array_key_exists($key, $posts[0])) {
+                    $ids = array_merge($ids, $this->normalizeRemoveMediaIds($posts[0][$key]));
+                }
+            }
+        }
+
+        return array_values(array_unique($ids));
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function normalizeRemoveMediaIds(mixed $value): array
+    {
+        $ids = [];
+
+        foreach ($this->normalizeFileGroup($value) as $item) {
+            if (is_int($item) || (is_string($item) && ctype_digit(trim($item)))) {
+                $ids[] = (int) $item;
+                continue;
+            }
+
+            if (is_array($item) && isset($item['id']) && is_numeric($item['id'])) {
+                $ids[] = (int) $item['id'];
+            }
+        }
+
+        return $ids;
     }
 
     private function wasUpdateMediaFieldProvided(Request $request, string $field): bool
@@ -1938,11 +2023,12 @@ class ListingController extends Controller
     }
 
     /**
-     * @return array{keep_urls: list<string>, new_files: list<UploadedFile>}
+     * @return array{keep_urls: list<string>, keep_ids: list<int>, new_files: list<UploadedFile>}
      */
     private function collectUpdateMediaSyncInputs(Request $request, string $field): array
     {
         $keepUrls = [];
+        $keepIds = [];
         $newFiles = [];
 
         $valueSources = [
@@ -1968,16 +2054,18 @@ class ListingController extends Controller
             $valueSources[] = $request->input((string) $key);
         }
 
-        foreach ($this->resolveUpdateFormDataSources($request) as $formData) {
-            if (array_key_exists($field, $formData)) {
-                $valueSources[] = $formData[$field];
-            }
-        }
-
+        // form-data may include an images key when the user removes media in the app UI.
+        // Trigger sync via wasUpdateMediaFieldProvided(), but never treat form-data URLs as keep-list entries.
         foreach ($valueSources as $value) {
             foreach ($this->normalizeFileGroup($value) as $item) {
                 if ($item instanceof UploadedFile) {
                     $newFiles[] = $item;
+                    continue;
+                }
+
+                $id = $this->extractMediaIdFromSyncItem($item);
+                if ($id !== null) {
+                    $keepIds[] = $id;
                     continue;
                 }
 
@@ -2016,12 +2104,14 @@ class ListingController extends Controller
 
         return [
             'keep_urls' => array_values(array_unique($keepUrls)),
+            'keep_ids' => array_values(array_unique($keepIds)),
             'new_files' => $deduped[$field] ?? [],
         ];
     }
 
     /**
      * @param  list<string>  $keepUrls
+     * @param  list<int>  $keepIds
      * @param  list<UploadedFile>  $newFiles
      */
     private function syncListingMediaType(
@@ -2029,6 +2119,7 @@ class ListingController extends Controller
         string $type,
         string $field,
         array $keepUrls,
+        array $keepIds,
         array $newFiles
     ): void {
         if ($keepUrls === [] && $newFiles !== []) {
@@ -2046,6 +2137,8 @@ class ListingController extends Controller
             }
         }
 
+        $keepIdMap = array_fill_keys($keepIds, true);
+
         $existing = $listing->media()->where('type', $type)->orderBy('order')->get();
         $order = 0;
 
@@ -2053,7 +2146,8 @@ class ListingController extends Controller
             $rawUrl = $media->getRawOriginal('url') ?? $media->getAttributes()['url'] ?? null;
             $normalized = $this->normalizeMediaUrlForComparison(is_string($rawUrl) ? $rawUrl : null);
 
-            if ($normalized !== null && isset($normalizedKeep[$normalized])) {
+            if (isset($keepIdMap[(int) $media->id])
+                || ($normalized !== null && isset($normalizedKeep[$normalized]))) {
                 if ((int) $media->order !== $order) {
                     $media->order = $order;
                     $media->save();
@@ -2076,8 +2170,11 @@ class ListingController extends Controller
     {
         if (is_string($item)) {
             $item = trim($item);
+            if ($item === '' || ctype_digit($item)) {
+                return null;
+            }
 
-            return $item === '' ? null : $item;
+            return $item;
         }
 
         if (!is_array($item)) {
@@ -2093,6 +2190,23 @@ class ListingController extends Controller
             if ($url !== '') {
                 return $url;
             }
+        }
+
+        return null;
+    }
+
+    private function extractMediaIdFromSyncItem(mixed $item): ?int
+    {
+        if (is_int($item)) {
+            return $item;
+        }
+
+        if (is_string($item) && ctype_digit(trim($item))) {
+            return (int) trim($item);
+        }
+
+        if (is_array($item) && isset($item['id']) && is_numeric($item['id'])) {
+            return (int) $item['id'];
         }
 
         return null;
