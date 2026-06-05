@@ -1840,11 +1840,11 @@ class ListingController extends Controller
 
     private function wasUpdateMediaFieldProvided(Request $request, string $field): bool
     {
-        if ($request->has("posts.0.{$field}") || $request->hasFile("posts.0.{$field}")) {
+        if ($this->requestHasInputKey($request, "posts.0.{$field}") || $request->hasFile("posts.0.{$field}")) {
             return true;
         }
 
-        if ($request->has($field) || $request->hasFile($field)) {
+        if ($this->requestHasInputKey($request, $field) || $request->hasFile($field)) {
             return true;
         }
 
@@ -1863,7 +1863,78 @@ class ListingController extends Controller
             }
         }
 
+        $payloads = $this->resolveIncomingPostPayloads($request);
+        if (!empty($payloads[0]) && is_array($payloads[0]) && array_key_exists($field, $payloads[0])) {
+            return true;
+        }
+
+        foreach ($this->resolveUpdateFormDataSources($request) as $formData) {
+            if (array_key_exists($field, $formData)) {
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    private function requestHasInputKey(Request $request, string $key): bool
+    {
+        if (method_exists($request, 'exists')) {
+            return $request->exists($key);
+        }
+
+        return $request->has($key);
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function resolveUpdateFormDataSources(Request $request): array
+    {
+        $sources = [];
+
+        foreach (['form-data', 'form_data', 'formData'] as $key) {
+            $parsed = $this->parseFormDataField($request->input($key));
+            if ($parsed !== [] && !array_is_list($parsed)) {
+                $sources[] = $parsed;
+            }
+        }
+
+        $posts = $request->input('posts');
+        if (is_array($posts)) {
+            foreach ($posts as $post) {
+                if (!is_array($post)) {
+                    continue;
+                }
+
+                foreach (['form-data', 'form_data', 'formData'] as $key) {
+                    if (!array_key_exists($key, $post)) {
+                        continue;
+                    }
+
+                    $parsed = $this->parseFormDataField($post[$key]);
+                    if ($parsed !== [] && !array_is_list($parsed)) {
+                        $sources[] = $parsed;
+                    }
+                }
+            }
+        }
+
+        $payloads = $this->resolveIncomingPostPayloads($request);
+        if (!empty($payloads[0]) && is_array($payloads[0])) {
+            foreach (['form-data', 'form_data', 'formData'] as $key) {
+                if (!array_key_exists($key, $payloads[0])) {
+                    continue;
+                }
+
+                $parsed = $this->parseFormDataField($payloads[0][$key]);
+                if ($parsed !== [] && !array_is_list($parsed)) {
+                    $sources[] = $parsed;
+                }
+            }
+        }
+
+        return $sources;
     }
 
     /**
@@ -1897,12 +1968,22 @@ class ListingController extends Controller
             $valueSources[] = $request->input((string) $key);
         }
 
+        foreach ($this->resolveUpdateFormDataSources($request) as $formData) {
+            if (array_key_exists($field, $formData)) {
+                $valueSources[] = $formData[$field];
+            }
+        }
+
         foreach ($valueSources as $value) {
             foreach ($this->normalizeFileGroup($value) as $item) {
                 if ($item instanceof UploadedFile) {
                     $newFiles[] = $item;
-                } elseif (is_string($item) && trim($item) !== '') {
-                    $keepUrls[] = trim($item);
+                    continue;
+                }
+
+                $url = $this->extractMediaUrlFromSyncItem($item);
+                if ($url !== null) {
+                    $keepUrls[] = $url;
                 }
             }
         }
@@ -1989,6 +2070,32 @@ class ListingController extends Controller
         if ($newFiles !== []) {
             $this->storeUploadedMediaFromFiles([$field => $newFiles], $listing, $order);
         }
+    }
+
+    private function extractMediaUrlFromSyncItem(mixed $item): ?string
+    {
+        if (is_string($item)) {
+            $item = trim($item);
+
+            return $item === '' ? null : $item;
+        }
+
+        if (!is_array($item)) {
+            return null;
+        }
+
+        foreach (['url', 'path', 'src'] as $key) {
+            if (!array_key_exists($key, $item) || !is_string($item[$key])) {
+                continue;
+            }
+
+            $url = trim($item[$key]);
+            if ($url !== '') {
+                return $url;
+            }
+        }
+
+        return null;
     }
 
     private function normalizeMediaUrlForComparison(?string $url): ?string
