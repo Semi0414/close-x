@@ -267,11 +267,15 @@ class ListingController extends Controller
     {
         try {
             $listingId = $listing->id;
-            $payload = $this->resolveUpdatePayload($request);
+            $payload = $this->normalizeListingFieldKeysInPayload(
+                $this->resolveUpdatePayload($request)
+            );
             $this->stripExpiryFieldsFromPayload($payload);
             $this->normalizeListingIntentInPayload($payload);
 
-            $formData = $this->extractFormDataFromPostPayload($payload, $request);
+            $formData = $this->normalizeListingFieldKeysInPayload(
+                $this->extractFormDataFromPostPayload($payload, $request)
+            );
             $this->stripExpiryFieldsFromPayload($formData);
             $this->removeFormDataKeysFromPayload($payload);
 
@@ -282,8 +286,10 @@ class ListingController extends Controller
                 $this->stripExpiryFieldsFromPayload($data);
             }
 
-            if (array_key_exists('kind', $data) && !$this->isBlankValue($data['kind'])) {
-                $formData['kind'] = $data['kind'];
+            $resolvedKind = $this->resolveKindForListingUpdate($data, $formData);
+            if ($resolvedKind !== null) {
+                $data['kind'] = $resolvedKind;
+                $formData['kind'] = $resolvedKind;
             }
 
             $this->stripBlankOptionalNotes($data, $formData);
@@ -873,6 +879,64 @@ class ListingController extends Controller
         unset($payload['status']);
     }
 
+    /**
+     * Mobile/add-post payloads often send Status/Kind with different casing.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function normalizeListingFieldKeysInPayload(array $payload): array
+    {
+        $normalized = [];
+
+        foreach ($payload as $key => $value) {
+            $canonical = match (strtolower(trim((string) $key))) {
+                'status' => 'status',
+                'kind' => 'kind',
+                default => $key,
+            };
+
+            if (!array_key_exists($canonical, $normalized)) {
+                $normalized[$canonical] = $value;
+                continue;
+            }
+
+            if ($this->isBlankValue($normalized[$canonical]) && !$this->isBlankValue($value)) {
+                $normalized[$canonical] = $value;
+            }
+        }
+
+        return $normalized;
+    }
+
+    /**
+     * Resolve listing intent (for sale / for rent / buy request) for listing_details.extra.kind.
+     *
+     * @param  array<string, mixed>  $data
+     * @param  array<string, mixed>  $formData
+     */
+    private function resolveKindForListingUpdate(array $data, array $formData): ?string
+    {
+        if (array_key_exists('kind', $data) && !$this->isBlankValue($data['kind'])) {
+            return trim((string) $data['kind']);
+        }
+
+        foreach (['kind', 'status'] as $key) {
+            if (!array_key_exists($key, $formData) || $this->isBlankValue($formData[$key])) {
+                continue;
+            }
+
+            $value = $formData[$key];
+            if ($this->isValidListingLifecycleStatus($value)) {
+                continue;
+            }
+
+            return trim((string) $value);
+        }
+
+        return null;
+    }
+
     private function syncListingIntentTags(Listing $listing, string $kind): void
     {
         $normalized = strtolower(trim(str_replace('_', ' ', $kind)));
@@ -1073,7 +1137,13 @@ class ListingController extends Controller
 
         if (!empty($objects)) {
             ksort($objects);
-            return array_values($objects);
+
+            return array_map(
+                fn ($payload) => is_array($payload)
+                    ? $this->normalizeListingFieldKeysInPayload($payload)
+                    : $payload,
+                array_values($objects)
+            );
         }
 
         $bracketStyle = [];
@@ -1098,23 +1168,31 @@ class ListingController extends Controller
 
         if (!empty($bracketStyle)) {
             ksort($bracketStyle);
-            return array_values($bracketStyle);
+
+            return array_map(
+                fn ($payload) => is_array($payload)
+                    ? $this->normalizeListingFieldKeysInPayload($payload)
+                    : $payload,
+                array_values($bracketStyle)
+            );
         }
 
-        return [$request->all()];
+        return [$this->normalizeListingFieldKeysInPayload($request->all())];
     }
 
     private function normalizePostsBracketFieldName(string $field): string
     {
         if (str_ends_with($field, '][]')) {
-            return substr($field, 0, -3);
+            $field = substr($field, 0, -3);
+        } elseif (str_ends_with($field, '[]')) {
+            $field = substr($field, 0, -2);
         }
 
-        if (str_ends_with($field, '[]')) {
-            return substr($field, 0, -2);
-        }
-
-        return $field;
+        return match (strtolower(trim($field))) {
+            'status' => 'status',
+            'kind' => 'kind',
+            default => $field,
+        };
     }
 
     private function normalizePostsInput(array $posts): array
@@ -1142,7 +1220,13 @@ class ListingController extends Controller
 
         if (!empty($indexedItems)) {
             ksort($indexedItems);
-            return array_values($indexedItems);
+
+            return array_map(
+                fn ($payload) => is_array($payload)
+                    ? $this->normalizeListingFieldKeysInPayload($payload)
+                    : $payload,
+                array_values($indexedItems)
+            );
         }
 
         $allItemsAreArrays = true;
@@ -1154,7 +1238,12 @@ class ListingController extends Controller
         }
 
         if ($allItemsAreArrays) {
-            return array_values(array_filter($posts, 'is_array'));
+            return array_map(
+                fn ($payload) => is_array($payload)
+                    ? $this->normalizeListingFieldKeysInPayload($payload)
+                    : $payload,
+                array_values(array_filter($posts, 'is_array'))
+            );
         }
 
         // Support field-array structure:
@@ -1187,7 +1276,7 @@ class ListingController extends Controller
             }
 
             if (!empty($item)) {
-                $normalized[] = $item;
+                $normalized[] = $this->normalizeListingFieldKeysInPayload($item);
             }
         }
 
@@ -1344,8 +1433,10 @@ class ListingController extends Controller
     {
         $sent = static fn (string $key): bool => array_key_exists($key, $data);
 
-        if ($sent('listing_type') || $sent('kind')) {
-            $listingType = $data['listing_type'] ?? $this->resolveListingType($data['kind'] ?? null);
+        $resolvedKind = $this->resolveKindForListingUpdate($data, $formData);
+
+        if ($sent('listing_type') || $resolvedKind !== null) {
+            $listingType = $data['listing_type'] ?? $this->resolveListingType($resolvedKind ?? ($data['kind'] ?? null));
             if ($listingType) {
                 $listing->listing_type = $listingType;
             }
@@ -1378,8 +1469,8 @@ class ListingController extends Controller
             $listing->tags = $this->normalizeTags($data['tags'] ?? []);
         }
 
-        if ($sent('kind') && !$this->isBlankValue($data['kind'])) {
-            $this->syncListingIntentTags($listing, (string) $data['kind']);
+        if ($resolvedKind !== null) {
+            $this->syncListingIntentTags($listing, $resolvedKind);
         }
 
         if ($sent('status') && $this->isValidListingLifecycleStatus($data['status'])) {
@@ -1415,8 +1506,8 @@ class ListingController extends Controller
             $extraChanged = true;
         }
 
-        if ($sent('kind')) {
-            $extra['kind'] = (string) $data['kind'];
+        if ($resolvedKind !== null) {
+            $extra['kind'] = $resolvedKind;
             $extraChanged = true;
         }
 
