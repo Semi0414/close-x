@@ -280,6 +280,7 @@ class ListingController extends Controller
             );
             $this->stripExpiryFieldsFromPayload($formData);
             $this->removeFormDataKeysFromPayload($payload);
+            $this->stripNonUploadMediaFromPayload($payload);
 
             $data = Validator::make($payload, $this->listingUpdateValidationRules())->validate();
 
@@ -304,7 +305,7 @@ class ListingController extends Controller
             $this->stripBlankOptionalNotes($data, $formData);
 
             $this->applyUpdateToListing($listing, $data, $formData);
-            $this->replaceListingMediaOnUpdate($listing, $request);
+            $this->syncListingMediaOnUpdate($listing, $request);
 
             $listing = $this->listingQuery->baseListingQuery($request, false)
                 ->whereKey($listingId)
@@ -1701,6 +1702,12 @@ class ListingController extends Controller
     {
         $rules = [];
         foreach ($this->listingStoreValidationRules() as $field => $rule) {
+            if (preg_match('/^(images|videos|documents)\.\*$/', $field)) {
+                // Update may send existing media URLs in posts[0][images][] to keep/remove.
+                $rules[$field] = 'sometimes|nullable';
+                continue;
+            }
+
             if (str_contains($field, '.*')) {
                 $rules[$field] = $rule;
                 continue;
@@ -1710,6 +1717,33 @@ class ListingController extends Controller
         }
 
         return $rules;
+    }
+
+    /**
+     * Existing media URLs are synced separately; keep only new uploads for validation.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function stripNonUploadMediaFromPayload(array &$payload): void
+    {
+        foreach (['images', 'videos', 'documents'] as $field) {
+            if (!array_key_exists($field, $payload)) {
+                continue;
+            }
+
+            $items = $this->normalizeFileGroup($payload[$field]);
+            $uploadsOnly = array_values(array_filter(
+                $items,
+                fn ($item) => $item instanceof UploadedFile
+            ));
+
+            if ($uploadsOnly === []) {
+                unset($payload[$field]);
+                continue;
+            }
+
+            $payload[$field] = $uploadsOnly;
+        }
     }
 
     private function resolveIncomingPostFiles(Request $request): array
@@ -1778,16 +1812,10 @@ class ListingController extends Controller
     }
 
     /**
-     * On update: replace listing_media rows per type (no append duplicates).
+     * On update: sync listing_media — keep posts[0][images][] URLs, remove omitted ones, add uploads.
      */
-    private function replaceListingMediaOnUpdate(Listing $listing, Request $request): void
+    private function syncListingMediaOnUpdate(Listing $listing, Request $request): void
     {
-        $mediaFiles = $this->collectUpdateMediaFiles($request);
-
-        if (!array_filter($mediaFiles)) {
-            return;
-        }
-
         $groups = [
             'images' => 'image',
             'videos' => 'video',
@@ -1795,59 +1823,192 @@ class ListingController extends Controller
         ];
 
         foreach ($groups as $field => $type) {
-            if (empty($mediaFiles[$field])) {
+            if (!$this->wasUpdateMediaFieldProvided($request, $field)) {
                 continue;
             }
 
-            $this->deleteListingMediaByType($listing, $type);
-            $this->storeUploadedMediaFromFiles([$field => $mediaFiles[$field]], $listing);
+            $sync = $this->collectUpdateMediaSyncInputs($request, $field);
+            $this->syncListingMediaType(
+                $listing,
+                $type,
+                $field,
+                $sync['keep_urls'],
+                $sync['new_files']
+            );
         }
     }
 
-    /**
-     * @return array{images: array, videos: array, documents: array}
-     */
-    private function collectUpdateMediaFiles(Request $request): array
+    private function wasUpdateMediaFieldProvided(Request $request, string $field): bool
     {
-        $files = [
-            'images' => [],
-            'videos' => [],
-            'documents' => [],
-        ];
+        if ($request->has("posts.0.{$field}") || $request->hasFile("posts.0.{$field}")) {
+            return true;
+        }
 
-        $payloadFiles = $this->resolveIncomingPostFiles($request);
-        $collectedFromPostsArray = !empty($payloadFiles[0]);
+        if ($request->has($field) || $request->hasFile($field)) {
+            return true;
+        }
 
-        if ($collectedFromPostsArray) {
-            foreach (array_keys($files) as $field) {
-                $files[$field] = array_merge(
-                    $files[$field],
-                    $this->normalizeFileGroup($payloadFiles[0][$field] ?? null)
-                );
+        foreach (array_keys($request->all()) as $key) {
+            if (preg_match('/^posts\[\d+\]\[' . preg_quote($field, '/') . '\]/i', (string) $key)) {
+                return true;
             }
         }
 
-        foreach (array_keys($files) as $field) {
-            if ($request->hasFile($field)) {
-                $files[$field] = array_merge(
-                    $files[$field],
-                    $this->normalizeFileGroup($request->file($field))
-                );
-            }
-
-            // posts.0.images is the same upload as posts[0][images] — skip when already collected.
-            if (!$collectedFromPostsArray) {
-                $nested = $request->file('posts.0.' . $field);
-                if ($nested !== null) {
-                    $files[$field] = array_merge(
-                        $files[$field],
-                        $this->normalizeFileGroup($nested)
-                    );
+        $posts = $request->input('posts');
+        if (is_array($posts)) {
+            foreach ($posts as $post) {
+                if (is_array($post) && array_key_exists($field, $post)) {
+                    return true;
                 }
             }
         }
 
-        return $this->deduplicateUploadedFileGroups($files);
+        return false;
+    }
+
+    /**
+     * @return array{keep_urls: list<string>, new_files: list<UploadedFile>}
+     */
+    private function collectUpdateMediaSyncInputs(Request $request, string $field): array
+    {
+        $keepUrls = [];
+        $newFiles = [];
+
+        $valueSources = [
+            $request->input("posts.0.{$field}"),
+            $request->input($field),
+        ];
+
+        $posts = $request->input('posts');
+        if (is_array($posts) && isset($posts[0]) && is_array($posts[0]) && array_key_exists($field, $posts[0])) {
+            $valueSources[] = $posts[0][$field];
+        }
+
+        $payloads = $this->resolveIncomingPostPayloads($request);
+        if (!empty($payloads[0]) && is_array($payloads[0]) && array_key_exists($field, $payloads[0])) {
+            $valueSources[] = $payloads[0][$field];
+        }
+
+        foreach (array_keys($request->all()) as $key) {
+            if (!preg_match('/^posts\[\d+\]\[' . preg_quote($field, '/') . '\](?:\[\])?$/i', (string) $key)) {
+                continue;
+            }
+
+            $valueSources[] = $request->input((string) $key);
+        }
+
+        foreach ($valueSources as $value) {
+            foreach ($this->normalizeFileGroup($value) as $item) {
+                if ($item instanceof UploadedFile) {
+                    $newFiles[] = $item;
+                } elseif (is_string($item) && trim($item) !== '') {
+                    $keepUrls[] = trim($item);
+                }
+            }
+        }
+
+        $payloadFiles = $this->resolveIncomingPostFiles($request);
+        $collectedFromPostsArray = !empty($payloadFiles[0]);
+
+        $fileSources = [];
+        if ($collectedFromPostsArray) {
+            $fileSources[] = $payloadFiles[0][$field] ?? null;
+        }
+
+        if ($request->hasFile($field)) {
+            $fileSources[] = $request->file($field);
+        }
+
+        if (!$collectedFromPostsArray) {
+            $fileSources[] = $request->file("posts.0.{$field}");
+        }
+
+        foreach ($fileSources as $group) {
+            foreach ($this->normalizeFileGroup($group) as $file) {
+                if ($file instanceof UploadedFile) {
+                    $newFiles[] = $file;
+                }
+            }
+        }
+
+        $deduped = $this->deduplicateUploadedFileGroups([$field => $newFiles]);
+
+        return [
+            'keep_urls' => array_values(array_unique($keepUrls)),
+            'new_files' => $deduped[$field] ?? [],
+        ];
+    }
+
+    /**
+     * @param  list<string>  $keepUrls
+     * @param  list<UploadedFile>  $newFiles
+     */
+    private function syncListingMediaType(
+        Listing $listing,
+        string $type,
+        string $field,
+        array $keepUrls,
+        array $newFiles
+    ): void {
+        if ($keepUrls === [] && $newFiles !== []) {
+            $this->deleteListingMediaByType($listing, $type);
+            $this->storeUploadedMediaFromFiles([$field => $newFiles], $listing);
+
+            return;
+        }
+
+        $normalizedKeep = [];
+        foreach ($keepUrls as $url) {
+            $normalized = $this->normalizeMediaUrlForComparison($url);
+            if ($normalized !== null) {
+                $normalizedKeep[$normalized] = true;
+            }
+        }
+
+        $existing = $listing->media()->where('type', $type)->orderBy('order')->get();
+        $order = 0;
+
+        foreach ($existing as $media) {
+            $rawUrl = $media->getRawOriginal('url') ?? $media->getAttributes()['url'] ?? null;
+            $normalized = $this->normalizeMediaUrlForComparison(is_string($rawUrl) ? $rawUrl : null);
+
+            if ($normalized !== null && isset($normalizedKeep[$normalized])) {
+                if ((int) $media->order !== $order) {
+                    $media->order = $order;
+                    $media->save();
+                }
+                $order++;
+
+                continue;
+            }
+
+            $this->deleteStoredMediaFile(is_string($rawUrl) ? $rawUrl : null);
+            $media->delete();
+        }
+
+        if ($newFiles !== []) {
+            $this->storeUploadedMediaFromFiles([$field => $newFiles], $listing, $order);
+        }
+    }
+
+    private function normalizeMediaUrlForComparison(?string $url): ?string
+    {
+        if (!is_string($url) || trim($url) === '') {
+            return null;
+        }
+
+        $url = trim($url);
+        $path = parse_url($url, PHP_URL_PATH);
+        if (!is_string($path) || $path === '') {
+            return strtolower($url);
+        }
+
+        $path = ltrim($path, '/');
+        if (Str::startsWith($path, 'storage/')) {
+            $path = Str::after($path, 'storage/');
+        }
+
+        return strtolower($path);
     }
 
     /**
