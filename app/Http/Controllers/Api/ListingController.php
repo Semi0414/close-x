@@ -1812,7 +1812,8 @@ class ListingController extends Controller
     }
 
     /**
-     * On update: sync listing_media — keep posts[0][images][] URLs, remove omitted ones, add uploads.
+     * On update: sync listing_media — posts[0][images][] may contain listing_media id, URL, or new file upload.
+     * Rows not in the keep list are deleted from listing_media.
      */
     private function syncListingMediaOnUpdate(Listing $listing, Request $request): void
     {
@@ -2122,12 +2123,15 @@ class ListingController extends Controller
         array $keepIds,
         array $newFiles
     ): void {
-        if ($keepUrls === [] && $newFiles !== []) {
+        if ($keepUrls === [] && $keepIds === [] && $newFiles !== []) {
             $this->deleteListingMediaByType($listing, $type);
             $this->storeUploadedMediaFromFiles([$field => $newFiles], $listing);
 
             return;
         }
+
+        $existingIds = $listing->media()->where('type', $type)->pluck('id')->all();
+        $keepIds = array_values(array_intersect($keepIds, array_map('intval', $existingIds)));
 
         $normalizedKeep = [];
         foreach ($keepUrls as $url) {
@@ -2198,15 +2202,30 @@ class ListingController extends Controller
     private function extractMediaIdFromSyncItem(mixed $item): ?int
     {
         if (is_int($item)) {
-            return $item;
+            return $item > 0 ? $item : null;
         }
 
-        if (is_string($item) && ctype_digit(trim($item))) {
-            return (int) trim($item);
+        if (is_string($item)) {
+            $item = trim($item);
+            if ($item === '' || !ctype_digit($item)) {
+                return null;
+            }
+
+            $id = (int) $item;
+
+            return $id > 0 ? $id : null;
         }
 
-        if (is_array($item) && isset($item['id']) && is_numeric($item['id'])) {
-            return (int) $item['id'];
+        if (is_array($item)) {
+            foreach (['id', 'media_id', 'listing_media_id'] as $key) {
+                if (!array_key_exists($key, $item) || !is_numeric($item[$key])) {
+                    continue;
+                }
+
+                $id = (int) $item[$key];
+
+                return $id > 0 ? $id : null;
+            }
         }
 
         return null;

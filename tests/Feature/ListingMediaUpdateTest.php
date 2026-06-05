@@ -240,6 +240,64 @@ class ListingMediaUpdateTest extends TestCase
         $this->assertSame(0, $listing->media()->where('type', 'image')->count());
     }
 
+    public function test_update_with_posts_images_ids_keeps_listed_and_deletes_omitted_from_listing_media(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        $keepMedia = $listing->media()->orderBy('order')->first();
+        $removeMedia = $listing->media()->orderBy('order')->skip(1)->first();
+
+        Sanctum::actingAs($user);
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'images' => [(string) $keepMedia->id],
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertTrue($listing->media()->whereKey($keepMedia->id)->exists());
+        $this->assertFalse($listing->media()->whereKey($removeMedia->id)->exists());
+    }
+
+    public function test_update_with_flat_posts_bracket_image_ids_syncs_listing_media(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        $keepMedia = $listing->media()->orderBy('order')->first();
+
+        Sanctum::actingAs($user);
+
+        $this->call('POST', "/api/listings/{$listing->id}/update", [
+            "posts[0][images][]" => (string) $keepMedia->id,
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertTrue($listing->media()->whereKey($keepMedia->id)->exists());
+    }
+
+    public function test_update_with_empty_posts_images_ids_deletes_all_listing_media_rows(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'images' => [],
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
     public function test_update_with_remove_media_ids_removes_specific_image(): void
     {
         $user = $this->actingBroker();
