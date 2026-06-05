@@ -11,7 +11,8 @@ use Illuminate\Http\Request;
 class ListingQueryService
 {
     public function __construct(
-        private ListingFormDataNormalizer $formDataNormalizer
+        private ListingFormDataNormalizer $formDataNormalizer,
+        private ListingMetricsService $metricsService
     ) {
     }
 
@@ -562,6 +563,11 @@ class ListingQueryService
         $listing->setAttribute('likes_count', (int) $listing->getAttribute('likes_count'));
         $listing->setAttribute('comments_count', (int) $listing->getAttribute('comments_count'));
         $listing->setAttribute('ratings_count', (int) $listing->getAttribute('ratings_count'));
+
+        $externalMetrics = $this->metricsService->externalTotalsForListing($listing);
+        $listing->setAttribute('views_count', $externalMetrics['views']['count']);
+        $listing->setAttribute('clicks_count', $externalMetrics['clicks']['count']);
+        $listing->setAttribute('leads_count', $externalMetrics['leads']['count']);
 
         if ($listing->relationLoaded('detail') && $listing->detail !== null) {
             $formData = $listing->detail->form_data;

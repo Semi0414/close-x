@@ -38,8 +38,6 @@ class ListingMetricsController extends Controller
 
     public function getViews(Request $request, Listing $listing): JsonResponse
     {
-        $this->assertOwner($request, $listing);
-
         return $this->listingMetricResponse($listing, 'views', ListingMetricEvent::METRIC_VIEW);
     }
 
@@ -50,8 +48,6 @@ class ListingMetricsController extends Controller
 
     public function getClicks(Request $request, Listing $listing): JsonResponse
     {
-        $this->assertOwner($request, $listing);
-
         return $this->listingMetricResponse($listing, 'clicks', ListingMetricEvent::METRIC_CLICK);
     }
 
@@ -62,8 +58,6 @@ class ListingMetricsController extends Controller
 
     public function getLeads(Request $request, Listing $listing): JsonResponse
     {
-        $this->assertOwner($request, $listing);
-
         return $this->listingMetricResponse($listing, 'leads', ListingMetricEvent::METRIC_LEAD);
     }
 
@@ -105,9 +99,10 @@ class ListingMetricsController extends Controller
             $external[$metricKey],
             [
                 'listing_id' => $listing->id,
-                'user_id' => $listing->created_by,
+                'listing_owner_id' => $listing->created_by,
                 'metric' => $metric,
                 'source' => 'other_users_only',
+                'excludes_listing_owner' => true,
             ]
         ));
     }
@@ -128,10 +123,4 @@ class ListingMetricsController extends Controller
         ));
     }
 
-    private function assertOwner(Request $request, Listing $listing): void
-    {
-        if ($listing->created_by !== $request->user()->id) {
-            abort(403, 'You are not allowed to access metrics for this listing.');
-        }
-    }
 }

@@ -399,14 +399,13 @@ class ListingController extends Controller
      */
     public function extendExpiry(Request $request, Listing $listing): JsonResponse
     {
-        $this->authorizeListing($request, $listing);
-
         $base = $listing->expires_at instanceof Carbon && $listing->expires_at->isFuture()
             ? $listing->expires_at->copy()
             : Carbon::now();
 
         $listing->expires_at = $base->addMonth();
-        if ($listing->status === 'inactive') {
+
+        if ($listing->status === 'expired') {
             $listing->status = 'active';
         }
 
@@ -423,6 +422,7 @@ class ListingController extends Controller
             'listing_id' => $listing->id,
             'expires_at' => $listing->expires_at?->toIso8601String(),
             'post_expiry' => $listing->post_expiry,
+            'status' => $listing->status,
             'marked_as' => $listing->marked_as,
             'marked_as_cleared' => $clearedMarkedAs,
         ]);
