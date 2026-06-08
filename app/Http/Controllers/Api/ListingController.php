@@ -306,6 +306,7 @@ class ListingController extends Controller
 
             $this->applyUpdateToListing($listing, $data, $formData);
             $this->syncListingMediaOnUpdate($listing, $request);
+            $this->purgeListingFormDataMedia($listing);
 
             $listing = $this->listingQuery->baseListingQuery($request, false)
                 ->whereKey($listingId)
@@ -1549,7 +1550,7 @@ class ListingController extends Controller
         if ($formData !== []) {
             $existingFormData = is_array($detail->form_data) ? $detail->form_data : [];
             $detail->form_data = $this->formDataNormalizer->normalize(array_merge(
-                $existingFormData,
+                $this->stripMediaKeysFromFormData($existingFormData),
                 $this->stripMediaKeysFromFormData($formData)
             ));
             $detailChanged = true;
@@ -1928,6 +1929,21 @@ class ListingController extends Controller
 
     private function wasUpdateMediaFieldProvided(Request $request, string $field): bool
     {
+        if ($this->wasExplicitUpdateMediaFieldProvided($request, $field)) {
+            return true;
+        }
+
+        foreach ($this->resolveUpdateFormDataSources($request) as $formData) {
+            if ($this->formDataHasMediaField($formData, $field)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function wasExplicitUpdateMediaFieldProvided(Request $request, string $field): bool
+    {
         if ($this->requestHasInputKey($request, "posts.0.{$field}") || $request->hasFile("posts.0.{$field}")) {
             return true;
         }
@@ -1940,6 +1956,10 @@ class ListingController extends Controller
             if (preg_match('/^posts\[\d+\]\[' . preg_quote($field, '/') . '\]/i', (string) $key)) {
                 return true;
             }
+        }
+
+        if ($this->requestHasUploadedFileInNestedArray($request->allFiles(), $field, 'posts')) {
+            return true;
         }
 
         $posts = $request->input('posts');
@@ -1957,6 +1977,74 @@ class ListingController extends Controller
         }
 
         return false;
+    }
+
+    /**
+     * @param  array<string|int, mixed>  $data
+     */
+    private function requestHasUploadedFileInNestedArray(array $data, string $field, ?string $parentKey = null): bool
+    {
+        foreach ($data as $key => $value) {
+            if ($value instanceof UploadedFile) {
+                if ((string) $key === $field) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if ((string) $key === $field || ($parentKey === 'posts' && is_numeric($key))) {
+                if ($this->requestHasUploadedFileInNestedArray($value, $field, (string) $key)) {
+                    return true;
+                }
+
+                continue;
+            }
+
+            if ($this->requestHasUploadedFileInNestedArray($value, $field, is_string($key) ? $key : (string) $key)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * @param  array<string, mixed>  $formData
+     */
+    private function formDataHasMediaField(array $formData, string $field): bool
+    {
+        if (array_key_exists($field, $formData)) {
+            return true;
+        }
+
+        return match ($field) {
+            'images' => array_key_exists('photos', $formData) || array_key_exists('image', $formData),
+            'videos' => array_key_exists('video', $formData),
+            'documents' => array_key_exists('attachments', $formData) || array_key_exists('document', $formData),
+            default => false,
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $formData
+     */
+    private function extractMediaFieldFromFormData(array $formData, string $field): mixed
+    {
+        if (array_key_exists($field, $formData)) {
+            return $formData[$field];
+        }
+
+        return match ($field) {
+            'images' => $formData['photos'] ?? $formData['image'] ?? null,
+            'videos' => $formData['video'] ?? null,
+            'documents' => $formData['attachments'] ?? $formData['document'] ?? null,
+            default => null,
+        };
     }
 
     private function requestHasInputKey(Request $request, string $key): bool
@@ -2026,7 +2114,7 @@ class ListingController extends Controller
     {
         $keepUrls = [];
         $keepIds = [];
-        $newFiles = [];
+        $newFiles = $this->collectUpdatePostMediaFiles($request, $field);
 
         $valueSources = [
             $request->input("posts.0.{$field}"),
@@ -2051,7 +2139,20 @@ class ListingController extends Controller
             $valueSources[] = $request->input((string) $key);
         }
 
-        // Keep list comes only from posts[0][images][] / images[] / file uploads — not form-data JSON.
+        $explicitFieldProvided = $this->wasExplicitUpdateMediaFieldProvided($request, $field)
+            || $newFiles !== [];
+
+        // posts[0][images][] wins over stale images inside form-data JSON.
+        if (!$explicitFieldProvided) {
+            foreach ($this->resolveUpdateFormDataSources($request) as $formData) {
+                if (!$this->formDataHasMediaField($formData, $field)) {
+                    continue;
+                }
+
+                $valueSources[] = $this->extractMediaFieldFromFormData($formData, $field);
+            }
+        }
+
         foreach ($valueSources as $value) {
             foreach ($this->normalizeFileGroup($value) as $item) {
                 if ($item instanceof UploadedFile) {
@@ -2072,30 +2173,6 @@ class ListingController extends Controller
             }
         }
 
-        $payloadFiles = $this->resolveIncomingPostFiles($request);
-        $collectedFromPostsArray = !empty($payloadFiles[0]);
-
-        $fileSources = [];
-        if ($collectedFromPostsArray) {
-            $fileSources[] = $payloadFiles[0][$field] ?? null;
-        }
-
-        if ($request->hasFile($field)) {
-            $fileSources[] = $request->file($field);
-        }
-
-        if (!$collectedFromPostsArray) {
-            $fileSources[] = $request->file("posts.0.{$field}");
-        }
-
-        foreach ($fileSources as $group) {
-            foreach ($this->normalizeFileGroup($group) as $file) {
-                if ($file instanceof UploadedFile) {
-                    $newFiles[] = $file;
-                }
-            }
-        }
-
         $deduped = $this->deduplicateUploadedFileGroups([$field => $newFiles]);
 
         return [
@@ -2103,6 +2180,82 @@ class ListingController extends Controller
             'keep_ids' => array_values(array_unique($keepIds)),
             'new_files' => $deduped[$field] ?? [],
         ];
+    }
+
+    /**
+     * @return list<UploadedFile>
+     */
+    private function collectUpdatePostMediaFiles(Request $request, string $field): array
+    {
+        $files = [];
+
+        $fileSources = [
+            $request->file($field),
+            $request->file("posts.0.{$field}"),
+        ];
+
+        $payloadFiles = $this->resolveIncomingPostFiles($request);
+        if (!empty($payloadFiles[0][$field])) {
+            $fileSources[] = $payloadFiles[0][$field];
+        }
+
+        foreach ($this->extractUploadedFilesFromNestedArray($request->allFiles(), $field) as $file) {
+            $fileSources[] = $file;
+        }
+
+        foreach ($request->all() as $key => $value) {
+            if (!preg_match('/^posts\[\d+\]\[' . preg_quote($field, '/') . '\]/i', (string) $key)) {
+                continue;
+            }
+
+            $fileSources[] = $value;
+        }
+
+        foreach ($fileSources as $group) {
+            foreach ($this->normalizeFileGroup($group) as $file) {
+                if ($file instanceof UploadedFile) {
+                    $files[] = $file;
+                }
+            }
+        }
+
+        return $this->deduplicateUploadedFileGroups([$field => $files])[$field] ?? [];
+    }
+
+    /**
+     * @param  array<string|int, mixed>  $data
+     * @return list<UploadedFile>
+     */
+    private function extractUploadedFilesFromNestedArray(array $data, string $field, ?string $parentKey = null): array
+    {
+        $files = [];
+
+        foreach ($data as $key => $value) {
+            if ($value instanceof UploadedFile) {
+                if ((string) $key === $field) {
+                    $files[] = $value;
+                }
+
+                continue;
+            }
+
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if ((string) $key === $field || ($parentKey === 'posts' && is_numeric($key))) {
+                $files = array_merge($files, $this->extractUploadedFilesFromNestedArray($value, $field, (string) $key));
+
+                continue;
+            }
+
+            $files = array_merge(
+                $files,
+                $this->extractUploadedFilesFromNestedArray($value, $field, is_string($key) ? $key : (string) $key)
+            );
+        }
+
+        return $files;
     }
 
     /**
@@ -2311,6 +2464,23 @@ class ListingController extends Controller
         if ($relative !== '') {
             Storage::disk('public')->delete($relative);
         }
+    }
+
+    private function purgeListingFormDataMedia(Listing $listing): void
+    {
+        $detail = $listing->detail;
+        if ($detail === null) {
+            return;
+        }
+
+        $formData = is_array($detail->form_data) ? $detail->form_data : [];
+        $cleaned = $this->stripMediaKeysFromFormData($formData);
+        if ($cleaned === $formData) {
+            return;
+        }
+
+        $detail->form_data = $cleaned === [] ? null : $this->formDataNormalizer->normalize($cleaned);
+        $detail->save();
     }
 
     /**

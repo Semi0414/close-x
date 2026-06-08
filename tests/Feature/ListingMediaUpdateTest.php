@@ -314,4 +314,184 @@ class ListingMediaUpdateTest extends TestCase
             (string) $listing->media()->first()->getRawOriginal('url')
         );
     }
+
+    public function test_update_with_form_data_only_images_removes_omitted_images(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'form-data' => json_encode([
+                        'images' => ['http://localhost/storage/listing-media/keep.jpg'],
+                    ]),
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertStringContainsString(
+            'keep.jpg',
+            (string) $listing->media()->first()->getRawOriginal('url')
+        );
+    }
+
+    public function test_update_with_empty_form_data_images_removes_all_images(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'form-data' => json_encode([
+                        'images' => [],
+                    ]),
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_explicit_empty_posts_images_wins_over_stale_form_data_images(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'images' => [],
+                    'form-data' => json_encode([
+                        'images' => ['http://localhost/storage/listing-media/keep.jpg'],
+                    ]),
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(0, $listing->media()->where('type', 'image')->count());
+    }
+
+    public function test_multipart_new_upload_with_stale_form_data_does_not_resurrect_removed_images(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('replacement.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'form-data' => json_encode([
+                        'title' => 'Flat JLT',
+                        'images' => [
+                            'http://localhost/storage/listing-media/keep.jpg',
+                            'http://localhost/storage/listing-media/remove.jpg',
+                        ],
+                    ]),
+                    'kind' => 'rent',
+                    'images' => [$file],
+                ],
+            ],
+        ])->assertOk();
+
+        $urls = $listing->media()->where('type', 'image')->orderBy('order')->pluck('url')->all();
+        $this->assertCount(1, $urls);
+        $this->assertFalse($listing->media()->where('url', 'like', '%remove.jpg')->exists());
+        $this->assertFalse($listing->media()->where('url', 'like', '%keep.jpg')->exists());
+    }
+
+    public function test_flat_bracket_upload_with_stale_form_data_replaces_existing_images(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        Sanctum::actingAs($user);
+
+        $file = UploadedFile::fake()->image('replacement.jpg');
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts[0][form-data]' => json_encode([
+                'images' => [
+                    'http://localhost/storage/listing-media/keep.jpg',
+                    'http://localhost/storage/listing-media/remove.jpg',
+                ],
+            ]),
+            'posts[0][images][]' => $file,
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertFalse($listing->media()->where('url', 'like', '%remove.jpg')->exists());
+        $this->assertFalse($listing->media()->where('url', 'like', '%keep.jpg')->exists());
+    }
+
+    public function test_multipart_kept_id_with_new_upload_and_stale_form_data_removes_omitted(): void
+    {
+        Storage::fake('public');
+
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        $keepMedia = $listing->media()->orderBy('order')->first();
+        $file = UploadedFile::fake()->image('replacement.jpg');
+
+        Sanctum::actingAs($user);
+
+        $this->post("/api/listings/{$listing->id}/update", [
+            'posts' => [
+                0 => [
+                    'form-data' => json_encode([
+                        'images' => [
+                            'http://localhost/storage/listing-media/keep.jpg',
+                            'http://localhost/storage/listing-media/remove.jpg',
+                        ],
+                    ]),
+                    'images' => [(string) $keepMedia->id, $file],
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertSame(2, $listing->media()->where('type', 'image')->count());
+        $this->assertTrue($listing->media()->whereKey($keepMedia->id)->exists());
+        $this->assertFalse($listing->media()->where('url', 'like', '%remove.jpg')->exists());
+    }
+
+    public function test_multipart_remove_one_image_via_kept_id_only_deletes_omitted(): void
+    {
+        $user = $this->actingBroker();
+        $listing = $this->listingWithMedia($user);
+
+        $keepMedia = $listing->media()->orderBy('order')->first();
+
+        Sanctum::actingAs($user);
+
+        $this->call('POST', "/api/listings/{$listing->id}/update", [
+            'posts[0][form-data]' => json_encode([
+                'title' => 'Flat JLT',
+                'images' => [
+                    'http://localhost/storage/listing-media/keep.jpg',
+                    'http://localhost/storage/listing-media/remove.jpg',
+                ],
+            ]),
+            'posts[0][kind]' => 'rent',
+            'posts[0][images][]' => (string) $keepMedia->id,
+        ])->assertOk();
+
+        $this->assertSame(1, $listing->media()->where('type', 'image')->count());
+        $this->assertTrue($listing->media()->whereKey($keepMedia->id)->exists());
+    }
 }
